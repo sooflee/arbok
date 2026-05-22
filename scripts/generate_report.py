@@ -541,6 +541,309 @@ def chart_total_leaderboard_top_n(n: int = 30) -> str:
     return f"<table class='leaderboard'>{header}{''.join(rows)}</table>"
 
 
+# ---------------------------------------------------------------------------
+# Macro context (section 5b): timing chart + hedge comparison.
+# Built from scripts/macro_context.py outputs.
+# ---------------------------------------------------------------------------
+TIMING_PARQUET = PROCESSED / "timing_universe_mean.parquet"
+HEDGE_PARQUET = PROCESSED / "hedge_comparison.parquet"
+
+# Friendlier display names for the hedge-comparison tables/charts.
+HEDGE_LABELS = {
+    "SP500":             "S&P 500 (price)",
+    "SP500_TR":          "S&P 500 (total return)",
+    "VTI_broad_market":  "VTI (broad US equity)",
+    "Gold_futures":      "Gold (front-month futures)",
+    "REIT_iShares_IYR":  "REITs (IYR ETF)",
+    "REIT_Vanguard_VNQ": "REITs (VNQ ETF)",
+    "Bitcoin":           "Bitcoin",
+    "RE_ZHVI_top100":    "US residential RE (ZHVI top-100 mean)",
+}
+# Order for charts/tables: most-canonical / longest-history first.
+HEDGE_ORDER = [
+    "RE_ZHVI_top100", "SP500", "SP500_TR", "VTI_broad_market",
+    "Gold_futures", "REIT_iShares_IYR", "REIT_Vanguard_VNQ", "Bitcoin",
+]
+
+
+def _load_timing() -> pd.DataFrame | None:
+    if not TIMING_PARQUET.exists():
+        return None
+    df = pd.read_parquet(TIMING_PARQUET)
+    df["year_month"] = pd.to_datetime(df["year_month"])
+    return df.sort_values("year_month").reset_index(drop=True)
+
+
+def _load_hedge() -> pd.DataFrame | None:
+    if not HEDGE_PARQUET.exists():
+        return None
+    df = pd.read_parquet(HEDGE_PARQUET)
+    df["year_month"] = pd.to_datetime(df["year_month"])
+    return df.sort_values(["asset", "year_month"]).reset_index(drop=True)
+
+
+def chart_timing_universe_mean(start_year: int = 2018) -> go.Figure | None:
+    """Predicted vs realized universe-mean fwd_3y, post-2012 LightGBM."""
+    df = _load_timing()
+    if df is None or df.empty:
+        return None
+    df = df[df["year_month"] >= pd.Timestamp(f"{start_year}-01-01")].copy()
+    latest = df.iloc[-1]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["year_month"], y=df["predicted_universe_mean"],
+        mode="lines", name="Predicted (model)",
+        line=dict(color="#2c5282", width=2),
+        hovertemplate="<b>%{x|%Y-%m}</b><br>Predicted: %{y:.2%}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["year_month"], y=df["realized_universe_mean"],
+        mode="lines", name="Realized (subsequent 3y, annualized)",
+        line=dict(color="#1a9850", width=2, dash="dash"),
+        hovertemplate="<b>%{x|%Y-%m}</b><br>Realized: %{y:.2%}<extra></extra>",
+    ))
+    # Highlight the most recent month.
+    fig.add_trace(go.Scatter(
+        x=[latest["year_month"]], y=[latest["predicted_universe_mean"]],
+        mode="markers+text", showlegend=False,
+        marker=dict(size=11, color="#2c5282", line=dict(color="white", width=2)),
+        text=[f"  current: {latest['predicted_universe_mean']:+.2%}"],
+        textposition="middle right", textfont=dict(size=11, color="#2c5282"),
+        hovertemplate="<b>%{x|%Y-%m}</b><br>Current: %{y:.2%}<extra></extra>",
+    ))
+    fig.add_hline(y=0, line=dict(color="#888", dash="dot", width=1))
+    fig.update_yaxes(tickformat=".1%",
+                     title="universe-mean fwd_3y annualized return")
+    fig.update_xaxes(title="month")
+    fig.update_layout(
+        title=("Universe-mean fwd_3y: model prediction vs realized "
+               "(top-100 metro ZIPs)"),
+        height=420, margin=dict(l=70, r=140, t=60, b=40),
+        legend=dict(orientation="h", y=-0.18),
+    )
+    return fig
+
+
+def timing_summary_stats() -> dict:
+    """Headline numbers for inline copy under the timing chart."""
+    df = _load_timing()
+    if df is None or df.empty:
+        return {}
+    latest = df.iloc[-1]
+    current = float(latest["predicted_universe_mean"])
+    all_preds = df["predicted_universe_mean"].dropna()
+    median = float(all_preds.median())
+    q25 = float(all_preds.quantile(0.25))
+    q75 = float(all_preds.quantile(0.75))
+    # Percentile of the current prediction across history.
+    percentile = float((all_preds < current).mean()) * 100
+    if percentile <= 25:
+        verdict = "bearish"
+    elif percentile >= 75:
+        verdict = "bullish"
+    else:
+        verdict = "neutral"
+    return {
+        "current": current,
+        "current_month": latest["year_month"],
+        "n_zips": int(latest["n_zips"]),
+        "p10": float(latest["predicted_universe_p10"]),
+        "p90": float(latest["predicted_universe_p90"]),
+        "median_hist": median,
+        "q25_hist": q25,
+        "q75_hist": q75,
+        "percentile": percentile,
+        "verdict": verdict,
+    }
+
+
+def chart_hedge_comparison(start_year: int = 2000) -> go.Figure | None:
+    """Cumulative real-return index per asset, indexed to 100 at start."""
+    df = _load_hedge()
+    if df is None or df.empty:
+        return None
+    df = df[df["year_month"] >= pd.Timestamp(f"{start_year}-01-01")].copy()
+
+    fig = go.Figure()
+    palette = {
+        "RE_ZHVI_top100":    "#d62728",  # red — the home team
+        "SP500":             "#1f77b4",
+        "SP500_TR":          "#3a5da9",
+        "VTI_broad_market":  "#5fa2dd",
+        "Gold_futures":      "#bf9000",
+        "REIT_iShares_IYR":  "#2ca02c",
+        "REIT_Vanguard_VNQ": "#7fbf7f",
+        "Bitcoin":           "#9b59b6",
+    }
+    for asset in HEDGE_ORDER:
+        sub = df[df["asset"] == asset].dropna(subset=["cum_real"])
+        if sub.empty:
+            continue
+        # Re-base to 100 at this asset's first observation (so short-history
+        # assets like BTC start at 100 in 2014, not show a giant offset).
+        first = float(sub["cum_real"].iloc[0])
+        norm = sub["cum_real"] / first * 100.0
+        fig.add_trace(go.Scatter(
+            x=sub["year_month"], y=norm,
+            mode="lines", name=HEDGE_LABELS.get(asset, asset),
+            line=dict(color=palette.get(asset, "#666"), width=2),
+            hovertemplate=("<b>%{x|%Y-%m}</b><br>"
+                           f"{HEDGE_LABELS.get(asset, asset)}: "
+                           "%{y:.1f}<extra></extra>"),
+        ))
+    fig.update_yaxes(type="log",
+                     title="cumulative real return (log scale, indexed to 100)")
+    fig.update_xaxes(title="month")
+    fig.update_layout(
+        title=("Cumulative real return per asset since 2000 "
+               "(BTC/VNQ/IYR rebased to 100 at first observation)"),
+        height=460, margin=dict(l=70, r=20, t=60, b=40),
+        legend=dict(orientation="h", y=-0.18),
+    )
+    return fig
+
+
+def hedge_historical_table() -> str:
+    """Median 3y / 5y real return, std, and share-positive across all rolling
+    windows since 2000."""
+    df = _load_hedge()
+    if df is None or df.empty:
+        return "<p><i>Hedge comparison not built — run scripts/macro_context.py.</i></p>"
+    rows = []
+    for asset in HEDGE_ORDER:
+        sub = df[df["asset"] == asset]
+        if sub.empty:
+            continue
+        r3 = sub["ann_3y_real"].dropna()
+        r5 = sub["ann_5y_real"].dropna()
+        if r3.empty:
+            continue
+        first_year = int(sub["year_month"].min().year)
+        rows.append({
+            "asset": HEDGE_LABELS.get(asset, asset),
+            "since": first_year,
+            "median_3y_real": float(r3.median()),
+            "std_3y_real": float(r3.std()),
+            "share_pos_3y": float((r3 > 0).mean()),
+            "median_5y_real": float(r5.median()) if not r5.empty else float("nan"),
+            "share_pos_5y": float((r5 > 0).mean()) if not r5.empty else float("nan"),
+        })
+    if not rows:
+        return "<p><i>Hedge comparison empty.</i></p>"
+    body = []
+    for r in rows:
+        five = ("—" if pd.isna(r["median_5y_real"])
+                else f"{r['median_5y_real']*100:+.2f}%")
+        five_pos = ("—" if pd.isna(r["share_pos_5y"])
+                    else f"{r['share_pos_5y']*100:.0f}%")
+        body.append(
+            f"<tr><td>{escape(r['asset'])}</td>"
+            f"<td>{r['since']}</td>"
+            f"<td>{r['median_3y_real']*100:+.2f}%</td>"
+            f"<td>{r['std_3y_real']*100:.2f}%</td>"
+            f"<td>{r['share_pos_3y']*100:.0f}%</td>"
+            f"<td>{five}</td>"
+            f"<td>{five_pos}</td></tr>"
+        )
+    return (
+        "<table class='headline'>"
+        "<tr><th>asset</th><th>history starts</th>"
+        "<th>median 3y real return</th><th>std 3y real</th>"
+        "<th>3y windows positive</th>"
+        "<th>median 5y real return</th><th>5y windows positive</th></tr>"
+        + "".join(body) + "</table>"
+    )
+
+
+def hedge_trailing_table() -> str:
+    """Trailing 3y real + nominal return ending the most recent month, plus
+    its spread vs the trailing 10y median for that asset."""
+    df = _load_hedge()
+    if df is None or df.empty:
+        return "<p><i>Hedge comparison not built — run scripts/macro_context.py.</i></p>"
+    rows = []
+    latest_month = df["year_month"].max()
+    rows_data = []
+    for asset in HEDGE_ORDER:
+        sub = df[df["asset"] == asset].sort_values("year_month")
+        if sub.empty:
+            continue
+        # Most-recent (or last non-null) trailing 3y window.
+        latest = sub.dropna(subset=["ann_3y_real"]).tail(1)
+        if latest.empty:
+            continue
+        ann_real = float(latest["ann_3y_real"].iloc[0])
+        ann_nom = float(latest["ann_3y_nominal"].iloc[0])
+        ts = latest["year_month"].iloc[0]
+        # Trailing-10y median of 3y-real windows ending up to today.
+        cutoff = ts - pd.DateOffset(years=10)
+        window = sub[(sub["year_month"] > cutoff)
+                     & (sub["year_month"] <= ts)]["ann_3y_real"].dropna()
+        med10 = float(window.median()) if not window.empty else float("nan")
+        spread = ann_real - med10 if not np.isnan(med10) else float("nan")
+        rows_data.append({
+            "asset": HEDGE_LABELS.get(asset, asset),
+            "ts": ts,
+            "ann_real": ann_real,
+            "ann_nom": ann_nom,
+            "med10": med10,
+            "spread": spread,
+        })
+
+    # Sort by trailing real return descending.
+    rows_data.sort(key=lambda r: r["ann_real"], reverse=True)
+    for r in rows_data:
+        sp_html = ("—" if np.isnan(r["spread"])
+                   else f"{r['spread']*100:+.2f} pp")
+        med_html = ("—" if np.isnan(r["med10"])
+                    else f"{r['med10']*100:+.2f}%")
+        rows.append(
+            f"<tr><td>{escape(r['asset'])}</td>"
+            f"<td>{r['ts'].date()}</td>"
+            f"<td>{r['ann_real']*100:+.2f}%</td>"
+            f"<td>{r['ann_nom']*100:+.2f}%</td>"
+            f"<td>{med_html}</td>"
+            f"<td>{sp_html}</td></tr>"
+        )
+    return (
+        "<table class='headline'>"
+        "<tr><th>asset</th><th>window ends</th>"
+        "<th>trailing 3y real return</th><th>trailing 3y nominal</th>"
+        "<th>trailing-10y median 3y real</th>"
+        "<th>spread vs 10y median</th></tr>"
+        + "".join(rows) + "</table>"
+    )
+
+
+def hedge_summary_for_copy() -> dict:
+    """Stash numbers for inline body copy."""
+    df = _load_hedge()
+    if df is None or df.empty:
+        return {}
+    medians = (
+        df.dropna(subset=["ann_3y_real"])
+          .groupby("asset")["ann_3y_real"].median()
+          .sort_values(ascending=False)
+    )
+    # Trailing 3y winner.
+    trailing = []
+    for asset in HEDGE_ORDER:
+        sub = df[df["asset"] == asset].dropna(subset=["ann_3y_real"])
+        if sub.empty:
+            continue
+        last = sub.iloc[-1]
+        trailing.append((asset, float(last["ann_3y_real"])))
+    trailing.sort(key=lambda x: x[1], reverse=True)
+    zhvi_sub = df[df["asset"] == "RE_ZHVI_top100"].dropna(subset=["ann_3y_real"])
+    zhvi_trailing = float(zhvi_sub["ann_3y_real"].iloc[-1]) if not zhvi_sub.empty else float("nan")
+    return {
+        "medians": [(HEDGE_LABELS.get(a, a), float(v)) for a, v in medians.items()],
+        "trailing": [(HEDGE_LABELS.get(a, a), v) for a, v in trailing],
+        "zhvi_trailing": zhvi_trailing,
+    }
+
+
 def backtest_summary_stats() -> dict:
     """Pull headline numbers for inline TL;DR copy."""
     def stats(df):
@@ -649,6 +952,67 @@ def main() -> None:
     # Personal-overlay fragment (section 8)
     overlay_section_html = OVERLAY_HTML if OVERLAY_HTML else "<p><i>Personal overlay not yet built.</i></p>"
 
+    # --- 5b · Macro context ------------------------------------------------
+    timing_fig = chart_timing_universe_mean()
+    if timing_fig is not None:
+        timing_chart_html = _div(timing_fig, include_js=False)
+    else:
+        timing_chart_html = ("<p class='caveat'>Timing chart not built yet — "
+                             "run <code>python scripts/macro_context.py</code>.</p>")
+    timing_stats = timing_summary_stats()
+    if timing_stats:
+        ts_current = timing_stats["current"]
+        ts_month = timing_stats["current_month"].strftime("%Y-%m")
+        ts_p10 = timing_stats["p10"]
+        ts_p90 = timing_stats["p90"]
+        ts_med = timing_stats["median_hist"]
+        ts_q25 = timing_stats["q25_hist"]
+        ts_q75 = timing_stats["q75_hist"]
+        ts_pct = timing_stats["percentile"]
+        ts_verdict = timing_stats["verdict"]
+        ts_n_zips = timing_stats["n_zips"]
+        _timing_df = _load_timing()
+        ts_n_hist = int(_timing_df.shape[0]) if _timing_df is not None else 0
+    else:
+        ts_current = ts_p10 = ts_p90 = ts_med = ts_q25 = ts_q75 = ts_pct = float("nan")
+        ts_month = "—"
+        ts_verdict = "n/a"
+        ts_n_zips = 0
+        ts_n_hist = 0
+
+    hedge_hist_html = hedge_historical_table()
+    hedge_trail_html = hedge_trailing_table()
+    hedge_fig = chart_hedge_comparison()
+    if hedge_fig is not None:
+        hedge_chart_html = _div(hedge_fig, include_js=False)
+    else:
+        hedge_chart_html = ("<p class='caveat'>Hedge chart not built yet — "
+                            "run <code>python scripts/macro_context.py</code>.</p>")
+    hedge_summary = hedge_summary_for_copy()
+    hedge_winner_3y_median = (
+        hedge_summary["medians"][0] if hedge_summary.get("medians") else ("n/a", float("nan"))
+    )
+    hedge_loser_3y_median = (
+        hedge_summary["medians"][-1] if hedge_summary.get("medians") else ("n/a", float("nan"))
+    )
+    hedge_winner_trailing = (
+        hedge_summary["trailing"][0] if hedge_summary.get("trailing") else ("n/a", float("nan"))
+    )
+    # Find ZHVI's rank for the body copy.
+    if hedge_summary.get("medians"):
+        labels = [a for a, _ in hedge_summary["medians"]]
+        zhvi_label = HEDGE_LABELS.get("RE_ZHVI_top100", "RE_ZHVI_top100")
+        try:
+            zhvi_rank = labels.index(zhvi_label) + 1
+            zhvi_3y_median = hedge_summary["medians"][zhvi_rank - 1][1]
+        except ValueError:
+            zhvi_rank = -1
+            zhvi_3y_median = float("nan")
+    else:
+        zhvi_rank = -1
+        zhvi_3y_median = float("nan")
+    n_assets = len(hedge_summary.get("medians", [])) or 0
+
     html = f"""<!DOCTYPE html>
 <html lang='en'>
 <head>
@@ -715,6 +1079,17 @@ def main() -> None:
           earning roughly <b>+{bt_price_excess:.2f} pp/yr</b> alpha. The yield-aware variant beat
           the universe in <b>{bt_total_hit:.1f}%</b> of months at <b>+{bt_total_excess:.2f} pp/yr</b>
           on a (smaller) yield-observable universe.</li>
+      <li><b>But is now a good time to buy?</b> The model's predicted universe-mean fwd_3y at
+          {ts_month} is <b>{ts_current*100:+.2f}%</b> — that sits at the
+          <b>{ts_pct:.0f}th percentile</b> of the post-2012 history (median +{ts_med*100:.2f}%).
+          Verdict: <b>{ts_verdict}</b> vs historical baseline. The model is saying "wait, or pick
+          carefully" rather than "buy the index". See section 5b.</li>
+      <li><b>Real estate vs other inflation hedges (median 3y real return, 2000-now, unlevered):</b>
+          Bitcoin and gold lead (+10% to +66% depending on selection bias); broad equity and REITs
+          mid-pack; <b>US residential RE comes last at ~+3.5%</b>. Trailing 3 years through {ts_month}
+          puts ZHVI top-100 at <b>{hedge_summary['zhvi_trailing']*100:+.2f}%</b> real, worst in the
+          cohort. Caveat: ZHVI is unlevered and ignores rent — net of leverage + carry, real estate
+          looks better; but it's not the runaway hedge folk wisdom claims.</li>
       <li><b>Robustness check.</b> Walk-forward CV across {wf3_n} rolling 12-month test
           windows gives fwd_3y Spearman ρ = <b>{wf3_mean:+.3f} ± {wf3_std:.3f}</b>. Spatial CV
           (hold out whole CBSAs, train+test ≤ 2017-12) on the <i>within-metro residual</i>
@@ -946,6 +1321,93 @@ def main() -> None:
      secretly a price-mean-reversion proxy (which would show a strong spread in the cheap tier and
      collapse near zero in the expensive one).</p>
 
+  <h2>5b · Macro context: is now a good time? And how does RE stack up against other hedges?</h2>
+  <p>Everything up to here is about <i>where</i> to buy. The two questions below are about
+     <i>when</i> and <i>what else</i>: does the model think the broad RE universe is cheap or
+     expensive right now, and how has private-RE actually fared against the other classic
+     inflation hedges (stocks, gold, REITs, BTC, TIPS) when you put them on the same axis?</p>
+
+  <h3>Is now a good time to buy?</h3>
+  <p>For each month from 2014 through the latest in the panel, we score every top-100-metro ZIP
+     with the headline post-2012 LightGBM and take the universe mean of the predicted fwd_3y
+     annualized return. The model's prediction at month <i>t</i> can be compared to the
+     <i>realized</i> universe-mean fwd_3y return three years later (dashed line) for all months
+     where t+3y is observable.</p>
+  {timing_chart_html}
+  <p>The model's current ({ts_month}) universe-mean predicted fwd_3y annualized return is
+     <b>{ts_current*100:+.2f}%</b> (median of the per-ZIP distribution that month;
+     {ts_n_zips:,} ZIPs scored, 80% prediction interval roughly
+     [<b>{ts_p10*100:+.2f}%</b>, <b>{ts_p90*100:+.2f}%</b>]). The historical median across all
+     scored months in the post-2012 panel is <b>{ts_med*100:+.2f}%</b> with an interquartile
+     range of [<b>{ts_q25*100:+.2f}%</b>, <b>{ts_q75*100:+.2f}%</b>]. The current prediction sits
+     at the <b>{ts_pct:.0f}th percentile</b> of history — the model is currently
+     <b>{ts_verdict}</b> vs the historical baseline (n = {ts_n_hist} months scored).</p>
+
+  <div class='caveat'>
+    <b>Read the timing chart carefully.</b> The model was trained on data ≤ 2017-12 with a
+    test window of 2018-01 onward, so anything from 2014-2017 is in-sample (the early part of
+    the predicted line tracks realized very closely because the model has seen those rows).
+    From 2018 forward, the gap between blue (predicted) and green (realized) is honest
+    out-of-sample error. The model under-predicted the 2020-2022 COVID-era surge — a regime
+    the training set didn't cover — and is now predicting near-zero / mildly negative returns
+    because trailing real-rate prints are at decade-plus highs. That is a structural feature
+    of the model, not a forecast of the future.
+  </div>
+
+  <h3>Real estate vs other inflation hedges</h3>
+  <p>RE is rarely held in isolation in a real portfolio — the question of "is now a good time
+     to buy a house" is really "is RE the best use of the marginal dollar right now". We assemble
+     a small benchmark set of public assets that are commonly framed as inflation hedges and put
+     them on the same chart, in <i>real</i> terms (after subtracting CPI growth over the same
+     window).</p>
+
+  <h4>Historical 3y / 5y annualized real returns (rolling, since 2000)</h4>
+  {hedge_hist_html}
+
+  <h4>Trailing 3-year real returns ending the most recent month</h4>
+  {hedge_trail_html}
+
+  <h4>Cumulative real return per asset, 2000-now (log scale)</h4>
+  {hedge_chart_html}
+
+  <p><b>What beat what.</b> Across the full 2000-now history of monthly rolling windows, the
+     median 3-year annualized real return ranking is dominated by Bitcoin
+     (<b>{hedge_winner_3y_median[1]*100:+.1f}%</b>, but on a much shorter history starting 2014
+     and with extreme tail risk in both directions) and then by gold and broad-equity / total-
+     return S&P 500 (mid-to-high single digits in real terms). REITs (IYR / VNQ) sit in the
+     <b>+4-6%</b> range as a public-market RE proxy. The Zillow ZHVI top-100 mean — our
+     private-RE benchmark, <i>before</i> leverage and <i>before</i> rent — comes in at
+     <b>{zhvi_3y_median*100:+.2f}%</b> median 3y real, ranking <b>#{zhvi_rank}/{n_assets}</b>
+     among the assets compared. The trailing-3y leader as of the latest month is
+     <b>{escape(hedge_winner_trailing[0])}</b> at <b>{hedge_winner_trailing[1]*100:+.2f}%</b>
+     real.</p>
+
+  <div class='caveat'>
+    <b>Honest caveats on the hedge comparison:</b>
+    <ul style='margin-top: .4em; margin-bottom: 0;'>
+      <li><b>BTC selection bias.</b> Bitcoin's history starts in 2014 (Yahoo's first month of
+          BTC-USD data), so its rolling-window stats are pulled from a strictly post-GFC,
+          mostly-bull-market regime. The other assets include 2000-2002 and 2008-2009 in their
+          medians; BTC does not.</li>
+      <li><b>REITs are not private RE.</b> IYR/VNQ are leveraged, mark-to-market, and earn
+          public-market liquidity discounts/premia. They're the best free TR proxy but they're
+          a different beast from owning a house.</li>
+      <li><b>ZHVI ignores rent, maintenance, and property tax.</b> Our RE return is a pure
+          price-index series (Zillow ZHVI). Real residential returns include rental yield
+          (positive carry) and maintenance / tax / insurance / vacancy costs (negative carry).
+          The yield-aware <code>fwd_3y_total</code> model in section 7 partially addresses
+          this for individual ZIPs, but not at the national-aggregate level shown here.</li>
+      <li><b>No leverage assumed.</b> Real-estate investors typically run 4-5× leverage via a
+          mortgage; the equity assets here are unlevered. A 3% nominal price return at 4×
+          leverage with a 6% mortgage is a different animal from the headline 3% — and that
+          gearing is what makes housing competitive with stocks for many households even when
+          the unlevered return is much lower.</li>
+      <li><b>Wilshire-from-FRED was retired in mid-2024;</b> we substitute VTI (Vanguard Total
+          Market) as the broad-equity proxy. Gold uses Yahoo's GC=F front-month futures (the
+          FRED London-fix series requires an API key, which is not configured in this run).</li>
+    </ul>
+  </div>
+
   <h2>6 · Where might the model want to buy today?</h2>
   {map_link_html}
   <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
@@ -998,11 +1460,13 @@ def main() -> None:
 
   <h2>Caveats and what's not in this run</h2>
   <ul>
-    <li><b>HMDA mortgage records just landed.</b> Tract-year origination counts + dollar volumes +
-        institutional-vs-owner-occupant share are now in the feature store at ~12% coverage (2020,
-        2022, 2023). They were added <i>after</i> the headline phase2 retrain, so they do not yet
-        appear in the SHAP charts or leaderboards above — a follow-up retrain would pull this
-        signal into the model.</li>
+    <li><b>HMDA mortgage records are in the feature store but didn't reach the trained model.</b>
+        Tract-year origination counts + institutional-share are loaded at ~12% panel coverage,
+        but the data only spans 2020 / 2022 / 2023. The post-2012 split's train window ends at
+        2017-12 — entirely pre-HMDA — so prep's coverage filter drops every HMDA column from X.
+        A retrain confirmed this: same model, same SHAP, no HMDA. A genuinely HMDA-aware experiment
+        needs a different split design (e.g. train 2020-2022, test 2023-2026) where train actually
+        sees HMDA values. Filed as a future experiment.</li>
     <li><b>Four data sources still pending.</b> FCC broadband (signed-URL endpoints, needs manual
         download), NOAA VIIRS satellite nightlights (needs EOG creds + rasterio), Foursquare POIs,
         and FBI NIBRS crime aggregates (needs <code>CDE_API_KEY</code>) are wired into the assembler
