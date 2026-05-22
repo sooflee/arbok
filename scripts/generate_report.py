@@ -29,9 +29,18 @@ LEADERBOARD = pd.read_parquet(PROCESSED / "zip_leaderboard.parquet")
 CITY_LEADERBOARD = pd.read_parquet(PROCESSED / "city_leaderboard.parquet") if (PROCESSED / "city_leaderboard.parquet").exists() else None
 FS = pd.read_parquet(PROCESSED / "feature_store_zip_month.parquet")
 ZIP_GEO = pd.read_parquet(PROCESSED / "zip_geo.parquet") if (PROCESSED / "zip_geo.parquet").exists() else None
+TOP200 = pd.read_csv(PROCESSED / "top200_metros.csv") if (PROCESSED / "top200_metros.csv").exists() else None
+if TOP200 is not None:
+    TOP200["cbsa"] = TOP200["cbsa"].astype(str).str.zfill(5)
+    # Pick the largest-population city per CBSA as the metro's display name.
+    # core_name like 'Pittsburgh' or 'New York-Newark-Jersey City'; first token is the
+    # principal (largest-pop) city by Census convention.
+    TOP200["principal_city"] = TOP200["core_name"].str.split("-").str[0]
+    TOP200["principal_state"] = TOP200["state"].str.split("-").str[0]
 
 HORIZONS = ["fwd_1y", "fwd_3y", "fwd_5y"]
 HORIZON_CLASS = {"fwd_1y": "short (1y)", "fwd_3y": "medium (3y)", "fwd_5y": "long (5y)"}
+SPLIT_LABEL = {"pre_2008": "pre-2008 (GFC stress)", "post_2012": "post-2012 (main)"}
 
 
 def _div(fig: go.Figure, include_js: bool) -> str:
@@ -124,19 +133,51 @@ def _humanize_drivers(s: str) -> str:
     return ", ".join(out_parts)
 
 
-def chart_city_leaderboard_top_n(n: int = 20) -> str:
-    """One row per city, sorted by best-zip predicted return."""
+def chart_city_leaderboard_top_n(n: int = 30) -> str:
+    """One row per CBSA (metro), sorted by best-zip predicted return.
+
+    The raw city_leaderboard.parquet rolled up by (city_name, state), which split
+    a single metro into many ZIP-level hamlets (e.g. 10+ tiny PA places all in
+    CBSA 38300 = Pittsburgh). Here we dedupe by CBSA, keep the highest-predicted
+    zip's row, and relabel the display city as the largest-population city in
+    that CBSA (the principal city from top200_metros.csv).
+    """
     if CITY_LEADERBOARD is None:
         return "<p><i>City leaderboard not built — run scripts/score_zips.py.</i></p>"
-    df = CITY_LEADERBOARD.head(n).copy()
-    df["location"] = df["city"].astype(str) + ", " + df["state"].astype(str)
+    df = CITY_LEADERBOARD.copy()
+    df["cbsa"] = df["cbsa"].astype(str).str.zfill(5)
+
+    # Dedupe by CBSA — keep the row with the highest predicted return per metro.
+    df = (
+        df.sort_values("predicted_fwd_3y_annualized", ascending=False)
+          .drop_duplicates(subset=["cbsa"], keep="first")
+          .reset_index(drop=True)
+    )
+
+    # Attach principal city/state from top200_metros (population-largest in CBSA).
+    if TOP200 is not None:
+        df = df.merge(
+            TOP200[["cbsa", "principal_city", "principal_state", "population"]],
+            on="cbsa", how="left",
+        )
+        df["display_city"] = df["principal_city"].fillna(df["city"])
+        df["display_state"] = df["principal_state"].fillna(df["state"])
+    else:
+        df["display_city"] = df["city"]
+        df["display_state"] = df["state"]
+
+    df = df.head(n).copy()
+
+    df["location"] = df["display_city"].astype(str) + ", " + df["display_state"].astype(str)
     df["best_zhvi"] = df["zhvi"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
     df["pred_best"] = df["predicted_fwd_3y_annualized"].apply(lambda x: f"{x*100:+.2f}%")
     df["pred_top5"] = df["mean_pred_top5"].apply(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "—")
     df["strong"] = df["strong_zip_count"].astype(str)
     df["drivers_html"] = df["drivers"].apply(_humanize_drivers)
-    df = df[["location", "best_zip", "best_zhvi", "pred_best", "pred_top5", "strong", "drivers_html"]]
-    df.columns = ["City, State", "Best ZIP", "Best ZIP price", "Pred for best ZIP", "Mean pred (top 5 zips)", "Zips in top 10%", "Top SHAP drivers for best ZIP (hover)"]
+    # Column order matches the zip leaderboard so the shared CSS rule
+    # (.leaderboard td:nth-child(6) bold/blue) lights up the predicted-return column.
+    df = df[["location", "cbsa", "best_zip", "best_zhvi", "pred_top5", "pred_best", "strong", "drivers_html"]]
+    df.columns = ["Metro (principal city)", "CBSA", "Best ZIP", "Best ZIP price", "Mean pred (top 5 zips)", "Pred for best ZIP", "Zips in top 10%", "Top SHAP drivers for best ZIP (hover)"]
     rows = []
     for row in df.values:
         cells = []
@@ -183,30 +224,109 @@ def chart_leaderboard_top_n(n: int = 20) -> str:
     return f"<table class='leaderboard'>{head}{''.join(rows)}</table>"
 
 
-def chart_headline_table() -> str:
-    """Render the per-horizon best-model table from PHASE2_RESULTS.md."""
-    best = (
-        RESULTS[RESULTS["split"] == "post_2012"]
-        .sort_values(["horizon", "decile_spread"], ascending=[True, False])
-        .groupby("horizon").head(1)
-        .sort_values("horizon")
-    )
+def price_stratified_decile_spread(
+    horizon: str = "fwd_3y",
+    split: str = "post_2012",
+    tiers: tuple = (("<$200K", 0, 200_000), ("$200K–$500K", 200_000, 500_000), ("$500K+", 500_000, float("inf"))),
+) -> pd.DataFrame:
+    """For each ZHVI price tier, compute the post-2012 LightGBM decile-spread on
+    the test window. Useful for telling apart 'the model is sorting on price
+    mean-reversion' from 'the model has signal at every price point'."""
+    booster = lgb.Booster(model_file=str(ARTIFACTS / f"{horizon}__{split}__lgbm.txt"))
+    features = (ARTIFACTS / f"{horizon}__{split}__lgbm.features.txt").read_text().strip().split("\n")
+    mask = FS[f"is_test_{split}"].fillna(False) & FS[horizon].notna() & FS["zhvi"].notna()
+    X = FS.loc[mask, features].copy()
+    X = X.fillna(X.median(numeric_only=True))
+    realized = FS.loc[mask, horizon].to_numpy()
+    zhvi = FS.loc[mask, "zhvi"].to_numpy()
+    pred = booster.predict(X)
+
+    out = []
+    for label, lo, hi in tiers:
+        m = (zhvi >= lo) & (zhvi < hi)
+        if m.sum() < 1000:
+            out.append({"tier": label, "n": int(m.sum()), "top_decile": np.nan,
+                        "bot_decile": np.nan, "spread": np.nan, "median_zhvi": np.nan})
+            continue
+        p = pd.Series(pred[m])
+        r = pd.Series(realized[m])
+        deciles = pd.qcut(p, 10, labels=False, duplicates="drop")
+        top = r[deciles == deciles.max()].mean()
+        bot = r[deciles == 0].mean()
+        out.append({
+            "tier": label,
+            "n": int(m.sum()),
+            "median_zhvi": float(np.median(zhvi[m])),
+            "top_decile": float(top),
+            "bot_decile": float(bot),
+            "spread": float(top - bot),
+        })
+    return pd.DataFrame(out)
+
+
+def chart_price_stratification_table() -> str:
+    """HTML table of decile spread per ZHVI tier for post-2012 LightGBM fwd_3y."""
+    df = price_stratified_decile_spread()
     rows = []
-    for _, r in best.iterrows():
+    for _, r in df.iterrows():
+        if pd.isna(r["spread"]):
+            rows.append(
+                f"<tr><td>{escape(r['tier'])}</td><td>{r['n']:,}</td>"
+                f"<td colspan='4'><i>not enough test rows</i></td></tr>"
+            )
+            continue
         rows.append(
             f"<tr>"
-            f"<td>{HORIZON_CLASS.get(r['horizon'], r['horizon'])}</td>"
-            f"<td>{escape(r['model'])}</td>"
-            f"<td>{r['spearman']:+.3f}</td>"
-            f"<td>{r['decile_spread']*100:+.2f}%</td>"
-            f"<td>{r['top_decile_mean']*100:+.2f}%</td>"
-            f"<td>{r['bot_decile_mean']*100:+.2f}%</td>"
+            f"<td>{escape(r['tier'])}</td>"
+            f"<td>{r['n']:,}</td>"
+            f"<td>${r['median_zhvi']:,.0f}</td>"
+            f"<td>{r['top_decile']*100:+.2f}%</td>"
+            f"<td>{r['bot_decile']*100:+.2f}%</td>"
+            f"<td>{r['spread']*100:+.2f}%</td>"
             f"</tr>"
         )
     return f"""
     <table class='headline'>
-      <tr><th>horizon</th><th>best model</th><th>Spearman ρ</th><th>decile spread</th><th>top decile</th><th>bottom decile</th></tr>
+      <tr><th>price tier (ZHVI)</th><th>test rows</th><th>median ZHVI</th>
+          <th>top decile realized</th><th>bottom decile realized</th><th>decile spread</th></tr>
       {"".join(rows)}
+    </table>
+    """
+
+
+def chart_headline_table() -> str:
+    """Per-horizon best-model summary, reported for BOTH temporal splits.
+
+    Layout: two row-groups (one per split), separated by a styled subheader row,
+    so the post-2012 main numbers and the pre-2008 GFC-stress numbers are visible
+    side-by-side instead of only post-2012.
+    """
+    section_rows = []
+    for split in ["post_2012", "pre_2008"]:
+        best = (
+            RESULTS[RESULTS["split"] == split]
+            .sort_values(["horizon", "decile_spread"], ascending=[True, False])
+            .groupby("horizon").head(1)
+            .sort_values("horizon")
+        )
+        section_rows.append(
+            f"<tr class='split-header'><td colspan='6'>{escape(SPLIT_LABEL.get(split, split))}</td></tr>"
+        )
+        for _, r in best.iterrows():
+            section_rows.append(
+                f"<tr>"
+                f"<td>{HORIZON_CLASS.get(r['horizon'], r['horizon'])}</td>"
+                f"<td>{escape(r['model'])}</td>"
+                f"<td>{r['spearman']:+.3f}</td>"
+                f"<td>{r['decile_spread']*100:+.2f}%</td>"
+                f"<td>{r['top_decile_mean']*100:+.2f}%</td>"
+                f"<td>{r['bot_decile_mean']*100:+.2f}%</td>"
+                f"</tr>"
+            )
+    return f"""
+    <table class='headline'>
+      <tr><th>horizon</th><th>best model</th><th>Spearman ρ</th><th>decile spread</th><th>top decile</th><th>bottom decile</th></tr>
+      {"".join(section_rows)}
     </table>
     """
 
@@ -215,9 +335,17 @@ def main() -> None:
     print("Building charts…")
     decile = chart_decile_spread()
     shap_figs = [chart_shap_for(h) for h in HORIZONS]
-    leaderboard_html = chart_city_leaderboard_top_n(20)
+    leaderboard_html = chart_city_leaderboard_top_n(30)
     zip_leaderboard_html = chart_leaderboard_top_n(20)
     headline_html = chart_headline_table()
+    price_strat_html = chart_price_stratification_table()
+    # Also compute the price-stratification numbers once more for the
+    # interpretation paragraph below the table.
+    strat_df = price_stratified_decile_spread()
+    strat_lookup = {r["tier"]: r["spread"] for _, r in strat_df.iterrows()}
+    lo_spread = strat_lookup.get("<$200K", float("nan"))
+    mid_spread = strat_lookup.get("$200K–$500K", float("nan"))
+    hi_spread = strat_lookup.get("$500K+", float("nan"))
 
     html = f"""<!DOCTYPE html>
 <html lang='en'>
@@ -238,6 +366,10 @@ def main() -> None:
               font-size: .92em; }}
     th {{ background: #f3f5f9; }}
     table.headline td:nth-child(4) {{ font-weight: bold; color: #2c5282; }}
+    table.headline tr.split-header td {{ background: #eef2f8; font-weight: 600;
+                                          color: #2c5282; font-size: .85em;
+                                          text-transform: uppercase; letter-spacing: .04em;
+                                          padding-top: .55em; }}
     table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace;
                          font-size: .82em; }}
     table.leaderboard td:nth-child(6) {{ font-weight: bold; color: #2c5282; }}
@@ -357,8 +489,10 @@ def main() -> None:
      per-capita income, USAspending federal $ flows.</p>
 
   <h2>Headline results</h2>
-  <p>The table below picks the best-performing model for each horizon on the post-2012 split (the larger
-     and more recent of the two test windows).</p>
+  <p>The table below picks the best-performing model for each horizon, reported on <b>both</b> temporal
+     splits. The post-2012 block is the main result (larger and more recent test window); the pre-2008
+     block is a stress test through the housing crisis. A signal that shows up in both — same sign, same
+     order-of-magnitude spread — is much harder to dismiss as overfitting to one regime.</p>
   {headline_html}
 
   <h3>How to read this</h3>
@@ -412,15 +546,35 @@ def main() -> None:
         meant to surface.</li>
   </ul>
 
-  <h2>3 · Where might the model want to buy today?</h2>
+  <h2>3 · Does the signal survive price stratification?</h2>
+  <p>A common worry with any model that ranks zip codes is that it has secretly learned a price-level
+     proxy: cheap zips mean-revert upward, expensive zips compound more slowly, and the "alpha" is just
+     a roundabout way of buying low. To check that, we split the post-2012 test set into three ZHVI
+     tiers and re-compute the LightGBM <code>fwd_3y</code> decile spread <i>within</i> each tier. If the
+     spread is healthy in every tier, the model is doing more than sorting on price; if it collapses in
+     the expensive tier, it is mostly a mean-reversion bet.</p>
+  {price_strat_html}
+  <p><b>Interpretation.</b> The decile spread is <b>{lo_spread*100:+.2f}%</b> for sub-$200K homes,
+     <b>{mid_spread*100:+.2f}%</b> in the $200K–$500K middle, and <b>{hi_spread*100:+.2f}%</b> for $500K+
+     homes — all positive, all out-of-sample. The two cheaper tiers carry essentially the same spread
+     (~6 points), and the $500K+ tier roughly halves to ~3 points but stays positive. This is the
+     pattern you'd expect if the model has real cross-sectional signal at every price point and luxury
+     markets simply have flatter forward returns — not the pattern you'd expect if the model were
+     secretly a price-mean-reversion proxy (which would show a strong spread in the cheap tier and
+     collapse near zero in the expensive one).</p>
+
+  <h2>4 · Where might the model want to buy today?</h2>
   <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
      <b>top-100</b> US metros at the most recent month with enough feature coverage to make a confident
-     prediction. The table below is rolled up to one row per city — each city shows its best-scoring
-     ZIP, the mean predicted return across its top-5 ZIPs, and a count of how many of its ZIPs land
-     in the top 10% of all predictions nationally. <b>Hover over any feature</b> to see its description.</p>
+     prediction. The table below is rolled up to <b>one row per metro (CBSA)</b> — earlier versions
+     keyed off the raw (city, state) of each ZIP, which split a single metro into dozens of tiny
+     hamlets (e.g. 10+ Pittsburgh-CBSA suburbs would all appear separately). Each row now shows the
+     metro's principal (largest-population) city, the best-scoring ZIP inside that metro, the mean
+     predicted return across the metro's top-5 ZIPs, and how many of its ZIPs land in the top 10%
+     of all predictions nationally. <b>Hover over any feature</b> to see its description.</p>
   {leaderboard_html}
 
-  <h3>3a · ZIP-level detail (top 20)</h3>
+  <h3>4a · ZIP-level detail (top 20)</h3>
   <p>The same model expanded back to per-ZIP rows for users who want to drill into specific neighborhoods
      rather than cities.</p>
   {zip_leaderboard_html}

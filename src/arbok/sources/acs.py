@@ -67,6 +67,33 @@ VARIABLES: dict[str, str] = {
     "bachelors_or_higher_pct": "S1501_C02_015E",
 }
 
+# ACS S0101 (Age & Sex subject table) had a schema break between the 2016 and
+# 2017 5-year vintages. Verified empirically on 2026-05-22 against the live
+# API and the Census variable-metadata endpoint:
+#
+# (a) For the 5-year age-bin codes S0101_C01_007E..S0101_C01_010E
+#     (25-29 / 30-34 / 35-39 / 40-44), the *label* is stable across
+#     2013-2022, but the *unit* changed: in 2013-2016 these return percent of
+#     total population (the bins for one ZCTA sum to ~100), while in 2017+
+#     they return absolute counts (sum to ~total_pop). We normalize the
+#     pre-2017 percentages back to counts using B01003_001E (total_pop, which
+#     is count-valued in every vintage).
+#
+# (b) S0101_C01_030E is *not* stable: in 2013-2016 it is "Median age (years)",
+#     in 2017+ it is "65 years and over" population. The pre-2017 row index
+#     for 65+ is different. Since fixing that is out of scope (would require
+#     a vintage-aware variable map for pop_65_plus), we explicitly null
+#     pop_65_plus for 2013-2016 rather than mis-converting median-age to a
+#     fake count.
+_S0101_PCT_VINTAGES = {2013, 2014, 2015, 2016}
+_S0101_AGE_BIN_FRIENDLY_NAMES = (
+    "pop_25_29",
+    "pop_30_34",
+    "pop_35_39",
+    "pop_40_44",
+)
+_S0101_BROKEN_PRE_2017 = ("pop_65_plus",)
+
 
 def _split_by_endpoint(variables: dict[str, str]) -> tuple[dict, dict]:
     """Split variables into detailed-table (B...) and subject-table (S...) buckets."""
@@ -137,6 +164,19 @@ def fetch_acs_zcta(
         out["owner_occupied_pct"] = (
             out["owner_occupied_units"].astype("Float64") / denom.astype("Float64")
         ) * 100.0
+
+    # Normalize S0101 age-bin units across vintages — see module-level note
+    # next to _S0101_PCT_VINTAGES. For 2013-2016 we convert percentages back
+    # to counts using total_pop, and we null pop_65_plus because the variable
+    # code points to a different concept in those vintages.
+    if year in _S0101_PCT_VINTAGES and "total_pop" in out.columns:
+        total = out["total_pop"].astype("Float64")
+        for col in _S0101_AGE_BIN_FRIENDLY_NAMES:
+            if col in out.columns:
+                out[col] = (out[col].astype("Float64") / 100.0) * total
+        for col in _S0101_BROKEN_PRE_2017:
+            if col in out.columns:
+                out[col] = pd.NA
 
     return out
 

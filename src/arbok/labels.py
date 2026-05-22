@@ -105,6 +105,50 @@ FEATURE_LABELS: dict[str, tuple[str, str]] = {
     "zbp__estab":                     ("Business establishments",  "Total business establishments in the zip (Census Zip Business Patterns, 2018 vintage)."),
     "zbp__emp":                       ("Business employment",      "Total employees of businesses in the zip."),
 
+    # ───────────────────────────────────── Property tax (derived from ACS)
+    "ptax__effective_property_tax_rate": ("Effective property tax rate",  "Median real-estate taxes paid / median home value per ZCTA (ACS B25103/B25077). NJ ≈ 2.2%, HI ≈ 0.25%."),
+    "ptax__median_real_estate_tax_paid": ("Median property tax paid",     "Median real-estate taxes paid by ZCTA owners with a mortgage (ACS B25103, $/yr)."),
+    "ptax__median_home_value":           ("ACS median home value",         "ACS-reported median owner-occupied home value (self-reported survey, B25077)."),
+
+    # ───────────────────────────────────── BEA per-capita income
+    "bea__per_capita_income_usd":        ("BEA per-capita income $",      "BEA per-capita personal income per county (annual). More current than ACS."),
+    "bea__total_personal_income_thousands": ("BEA total personal income $K", "Total county personal income from BEA, in $1k (annual)."),
+    "bea__population":                   ("BEA population",                "BEA estimated population per county (annual; differs from Census PEP marginally)."),
+
+    # ───────────────────────────────────── CMS Hospital Compare
+    "cms__hospital_count":                ("Hospitals in county",          "Count of Medicare-certified hospitals in the county (CMS Provider Data)."),
+    "cms__mean_star_rating":              ("Mean hospital star rating",    "Mean overall 1-5 CMS star rating across rated hospitals in the county."),
+    "cms__total_beds":                    ("Hospital bed count",            "Total Medicare-certified hospital beds in the county (may be NaN — POS extract needed)."),
+    "cms__pct_with_4plus_stars":          ("% hospitals 4+ stars",         "Share of rated hospitals in the county scoring 4 or 5 CMS overall stars."),
+
+    # ───────────────────────────────────── MIT Election Lab
+    "mit__dem_vote_share":                ("Dem vote share (county)",      "County Democratic vote share at the prior presidential election (MIT Election Lab)."),
+    "mit__rep_vote_share":                ("Rep vote share (county)",      "County Republican vote share at the prior presidential election (MIT Election Lab)."),
+    "mit__margin":                        ("Vote margin (Dem-Rep)",        "Signed vote margin: + = Dem-leaning county, - = Rep-leaning."),
+    "mit__winner_party":                  ("Winning party (county)",        "Party that won the most recent presidential vote in this county."),
+
+    # ───────────────────────────────────── County Health Rankings
+    "health__health_outcomes_rank":       ("Health outcomes rank",          "National percentile rank derived from premature death rate (lower = healthier)."),
+    "health__health_factors_rank":        ("Health factors rank",           "National percentile composite of smoking, obesity, uninsured, poverty (lower = better)."),
+    "health__pct_smokers":                ("% adult smokers",               "Share of adults who currently smoke (County Health Rankings v009)."),
+    "health__pct_obese":                  ("% adult obese",                 "Share of adults with BMI ≥ 30 (CHR)."),
+    "health__pct_uninsured":              ("% uninsured",                   "Share of population under 65 without health insurance (CHR)."),
+    "health__pct_in_poverty":             ("% in poverty",                  "Share of population below federal poverty line (CHR)."),
+    "health__avg_daily_pm25":             ("Avg daily PM2.5",                "County average daily PM2.5 concentration (µg/m³) per CHR — duplicates EPA AQS at lower resolution."),
+
+    # ───────────────────────────────────── HUD Fair Market Rent
+    "fmr__fmr_efficiency":                ("FMR studio",                    "HUD Fair Market Rent for an efficiency unit (Small Area FMR for ZIPs in 24 designated metros)."),
+    "fmr__fmr_1br":                       ("FMR 1-bedroom",                 "HUD Fair Market Rent for a 1-bedroom unit ($/mo)."),
+    "fmr__fmr_2br":                       ("FMR 2-bedroom",                 "HUD Fair Market Rent for a 2-bedroom unit ($/mo). The Section-8 reference."),
+    "fmr__fmr_3br":                       ("FMR 3-bedroom",                 "HUD Fair Market Rent for a 3-bedroom unit ($/mo)."),
+    "fmr__fmr_4br":                       ("FMR 4-bedroom",                 "HUD Fair Market Rent for a 4-bedroom unit ($/mo)."),
+
+    # ───────────────────────────────────── EIA energy
+    "elec__elec_residential_cents_per_kwh": ("Residential electricity ¢/kWh", "Monthly average residential electricity price per state from EIA (¢/kWh)."),
+
+    # ───────────────────────────────────── Behavioral
+    "wiki__wiki_pageviews":               ("Wikipedia pageviews",           "Monthly pageviews of the metro's primary Wikipedia article — search-interest proxy."),
+
     # ───────────────────────────────────── Pseudo-feature: zhvi at time t
     "zhvi_t":                         ("ZHVI at time t",            "Current Zillow Home Value Index for the zip — the price level we're predicting the return on."),
 }

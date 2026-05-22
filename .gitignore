@@ -24,6 +24,8 @@ data/interim/*
 !data/interim/.gitkeep
 data/processed/*.parquet
 data/processed/*.feather
+data/processed/phase2_artifacts/
+data/processed/phase2_artifacts_demeaned/
 
 # Secrets / env
 .env

@@ -8,9 +8,11 @@ ready for sklearn.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterator
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import GroupKFold
 
 from arbok.config import HORIZONS_MONTHS
 
@@ -162,3 +164,93 @@ def spatial_cv_folds(
         train_idx = pos[~val_mask].values
         folds.append((train_idx, val_idx))
     return folds
+
+
+def spatial_kfold(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    cbsa_col: str = "cbsa",
+    random_state: int = 42,
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Group-by-CBSA k-fold split. Yields ``(train_idx, test_idx)`` integer-position arrays.
+
+    Why: temporal CV catches "the future is different from the past" leakage, but it
+    does NOT catch "the zip next door, same metro, same school district, same labor
+    market, was in train" leakage. Holding out entire CBSAs forces the model to
+    generalize across metros — the harder, more honest test for cross-sectional
+    return prediction.
+
+    Implementation: shuffles the unique CBSAs with ``random_state`` for reproducibility,
+    then delegates to :class:`sklearn.model_selection.GroupKFold` so partitioning is
+    balanced by row count (not by CBSA count). This matters because Phoenix has ~200
+    zips and a small CBSA might have 5 — naive equal-CBSA-per-fold partitioning would
+    produce wildly unequal test sizes.
+
+    Yields integer positional indices (compatible with ``df.iloc[...]`` and sklearn
+    estimator ``fit``/``predict`` flows) regardless of the input frame's index.
+    """
+    if cbsa_col not in df.columns:
+        raise ValueError(f"{cbsa_col!r} not in DataFrame columns")
+    if n_splits < 2:
+        raise ValueError(f"n_splits must be >= 2, got {n_splits}")
+
+    groups = df[cbsa_col].to_numpy()
+    unique_cbsas = pd.unique(groups)
+    if len(unique_cbsas) < n_splits:
+        raise ValueError(
+            f"Need at least {n_splits} unique CBSAs, found {len(unique_cbsas)}"
+        )
+
+    # Shuffle CBSAs with the given seed, then remap each row's group to its new
+    # shuffled position. GroupKFold itself is deterministic and does NOT shuffle,
+    # so we have to inject randomness ourselves.
+    rng = np.random.default_rng(random_state)
+    perm = rng.permutation(unique_cbsas)
+    cbsa_to_order = {c: i for i, c in enumerate(perm)}
+    shuffled_groups = np.array([cbsa_to_order[c] for c in groups])
+
+    gkf = GroupKFold(n_splits=n_splits)
+    # GroupKFold needs an X just for length; we don't actually use the features here.
+    for train_idx, test_idx in gkf.split(np.zeros(len(df)), groups=shuffled_groups):
+        yield train_idx, test_idx
+
+
+def spatiotemporal_split(
+    df: pd.DataFrame,
+    train_until: str | pd.Timestamp,
+    test_cbsas: list[str] | set[str] | np.ndarray | pd.Series,
+    cbsa_col: str = "cbsa",
+    time_col: str = "month",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Single (train_idx, test_idx) split that stresses BOTH time and space.
+
+    - train = rows with ``time_col <= train_until`` AND ``cbsa_col NOT in test_cbsas``
+    - test  = rows with ``time_col >  train_until`` AND ``cbsa_col IN test_cbsas``
+
+    This deliberately excludes the "future of training CBSAs" and "history of test
+    CBSAs" buckets from both sides — the model never sees the test metros at all
+    (spatial holdout) AND must predict a future period (temporal holdout). It is
+    the strictest realistic generalization test: a new metro you've never modeled,
+    in a future you haven't observed.
+
+    Returns integer positional indices into ``df`` (suitable for ``df.iloc[...]``).
+    """
+    if cbsa_col not in df.columns:
+        raise ValueError(f"{cbsa_col!r} not in DataFrame columns")
+    if time_col not in df.columns:
+        raise ValueError(f"{time_col!r} not in DataFrame columns")
+
+    cutoff = pd.Timestamp(train_until)
+    test_set = set(pd.Index(test_cbsas).astype(str))
+
+    times = pd.to_datetime(df[time_col])
+    cbsas = df[cbsa_col].astype(str)
+    in_test_cbsas = cbsas.isin(test_set).to_numpy()
+    is_past = (times <= cutoff).to_numpy()
+    is_future = (times > cutoff).to_numpy()
+
+    train_mask = is_past & ~in_test_cbsas
+    test_mask = is_future & in_test_cbsas
+
+    pos = np.arange(len(df))
+    return pos[train_mask], pos[test_mask]

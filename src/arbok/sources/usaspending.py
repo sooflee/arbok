@@ -116,57 +116,42 @@ def _download_zip(url: str, dest: Path) -> Path:
     return dest
 
 
-def _read_csv_columns(fh) -> tuple[str, str]:
-    """Sniff which zip + award-key column names this CSV uses.
-
-    Contract CSVs:  recipient_zip_4_code  + contract_award_unique_key
-    Assistance:     recipient_zip_code    + assistance_award_unique_key
-    """
-    header = pd.read_csv(fh, nrows=0).columns.tolist()
-    fh.seek(0)
-    zip_col = "recipient_zip_4_code" if "recipient_zip_4_code" in header else "recipient_zip_code"
-    key_col = (
-        "contract_award_unique_key" if "contract_award_unique_key" in header
-        else "assistance_award_unique_key"
-    )
-    return zip_col, key_col
-
-
 def _aggregate_csv_in_zip(zip_path: Path, fiscal_year: int) -> pd.DataFrame:
-    """Stream every CSV in the archive, aggregating obligations by recipient zip5."""
-    obl_totals: dict[str, float] = {}
-    award_sets: dict[str, set] = {}
+    """Stream every CSV in the archive, aggregating obligations by recipient zip5.
+
+    Contract CSVs use `recipient_zip_4_code` + `contract_award_unique_key`;
+    assistance CSVs use `recipient_zip_code` + `assistance_award_unique_key`.
+    We sniff per-file and emit one long frame, then aggregate at the end.
+    """
+    parts: list[pd.DataFrame] = []
     with zipfile.ZipFile(zip_path) as zf:
         for name in (n for n in zf.namelist() if n.lower().endswith(".csv")):
             print(f"[usaspending]   aggregating {name}")
             with zf.open(name) as sniff_fh:
-                zip_col, key_col = _read_csv_columns(sniff_fh)
+                header = pd.read_csv(sniff_fh, nrows=0).columns.tolist()
+            zip_col = "recipient_zip_4_code" if "recipient_zip_4_code" in header else "recipient_zip_code"
+            key_col = "contract_award_unique_key" if "contract_award_unique_key" in header else "assistance_award_unique_key"
             with zf.open(name) as fh:
-                reader = pd.read_csv(
+                for chunk in pd.read_csv(
                     fh,
                     usecols=[zip_col, "federal_action_obligation", key_col],
                     dtype={zip_col: "string", key_col: "string"},
                     chunksize=CHUNK_ROWS,
                     low_memory=False,
-                )
-                for chunk in reader:
-                    zip5 = (
-                        chunk[zip_col].astype("string").str.replace("-", "", regex=False)
-                        .str.extract(r"^(\d{5})", expand=False)
-                    )
+                ):
+                    zip5 = (chunk[zip_col].astype("string").str.replace("-", "", regex=False)
+                            .str.extract(r"^(\d{5})", expand=False))
                     obl = pd.to_numeric(chunk["federal_action_obligation"], errors="coerce").fillna(0.0)
-                    sub = pd.DataFrame({"zip": zip5, "obl": obl, "k": chunk[key_col]}).dropna(subset=["zip"])
-                    grouped = sub.groupby("zip", sort=False)
-                    for z, grp in grouped:
-                        obl_totals[z] = obl_totals.get(z, 0.0) + float(grp["obl"].sum())
-                        award_sets.setdefault(z, set()).update(grp["k"].dropna().tolist())
-    zips = list(obl_totals.keys())
-    out = pd.DataFrame({
-        "zip": zips,
-        "fiscal_year": fiscal_year,
-        "total_obligations_usd": [obl_totals[z] for z in zips],
-        "n_awards": [len(award_sets[z]) for z in zips],
-    })
+                    sub = pd.DataFrame({"zip": zip5, "obl": obl, "key": chunk[key_col]}).dropna(subset=["zip"])
+                    if not sub.empty:
+                        parts.append(sub)
+    if not parts:
+        return pd.DataFrame(columns=["zip", "fiscal_year", "total_obligations_usd", "n_awards"])
+    long = pd.concat(parts, ignore_index=True)
+    totals = long.groupby("zip", sort=False)["obl"].sum().rename("total_obligations_usd")
+    n_awards = long.dropna(subset=["key"]).groupby("zip", sort=False)["key"].nunique().rename("n_awards")
+    out = pd.concat([totals, n_awards], axis=1).fillna({"n_awards": 0}).reset_index()
+    out.insert(1, "fiscal_year", fiscal_year)
     out["n_awards"] = out["n_awards"].astype("Int64")
     return out.sort_values("total_obligations_usd", ascending=False).reset_index(drop=True)
 
@@ -199,7 +184,12 @@ def build_and_save(years: list[int], award_type: str = "all") -> Path:
 
 
 def load_usaspending() -> pd.DataFrame:
-    """Convenience loader: build the parquet if missing, then read it."""
+    """Convenience loader. Will NOT auto-fetch (live pull is multi-tens-of-minutes);
+    call build_and_save([year]) explicitly if the parquet is missing."""
     if not OUTPUT_PATH.exists():
-        build_and_save([pd.Timestamp.today().year - 1])
+        raise FileNotFoundError(
+            f"{OUTPUT_PATH} not present. Run scripts/build_usaspending.py or "
+            f"`from arbok.sources.usaspending import build_and_save; build_and_save([2023])` "
+            "manually — the live API pull is 15-30 minutes per fiscal year."
+        )
     return pd.read_parquet(OUTPUT_PATH)

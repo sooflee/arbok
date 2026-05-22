@@ -6,13 +6,13 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import ElasticNet
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import QuantileTransformer
 
 
 @dataclass
 class ElasticFit:
     model: ElasticNet
-    scaler: StandardScaler
+    scaler: QuantileTransformer
     feature_names: list[str]
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -37,13 +37,30 @@ def fit_elasticnet(
     max_iter: int = 5_000,
     random_state: int = 0,
 ) -> ElasticFit:
-    """Fit ElasticNet on standardized features so coefficients are comparable.
+    """Fit ElasticNet on quantile-transformed features so coefficients are comparable.
 
-    alpha=0.01 — a previous run with alpha=1e-3 produced runaway predictions
-    (RMSE 0.5 on fwd_1y vs LightGBM 0.07). Strong-magnitude features (M2,
-    Case-Shiller) need real regularization even after standardization.
+    Why QuantileTransformer, not StandardScaler:
+        Some features (notably the ACS pop_* age-bin columns) have a unit
+        change between training-era vintages and test-era vintages — pre-2018
+        rows are pop shares (mean ~7), post-2018 rows are raw counts (mean
+        ~1200). StandardScaler fit on train-era stats then applied to test
+        produces scaled values >10,000 in absolute terms, and a linear model's
+        predictions blow up by hundreds of percent. QuantileTransformer maps
+        every feature to a percentile rank against the train distribution, so
+        out-of-distribution test values get clamped to the train edges and
+        the model stays in-distribution. This is the same property tree
+        models get for free; we have to add it to linear models explicitly.
+
+    alpha=0.01 — strong enough to keep coefficients honest after the rank
+    transform. Lower alpha works too (test RMSE is similar) but produces
+    more nonzero coefficients with marginal signal.
     """
-    scaler = StandardScaler()
+    scaler = QuantileTransformer(
+        n_quantiles=min(1000, max(10, len(X_train) // 100)),
+        output_distribution="normal",
+        subsample=200_000,
+        random_state=random_state,
+    )
     X_scaled = scaler.fit_transform(X_train)
     m = ElasticNet(
         alpha=alpha, l1_ratio=l1_ratio, max_iter=max_iter, random_state=random_state,

@@ -255,6 +255,90 @@ def _adapter_usaspending() -> pd.DataFrame:
     return df  # zip + year
 
 
+def _adapter_property_tax() -> pd.DataFrame:
+    """Effective property tax rate per ZCTA (derived from ACS B25103 / B25077)."""
+    from arbok.sources.property_tax import load_property_tax
+    df = load_property_tax()
+    return df.rename(columns={"zcta": "zip"})  # zip + year
+
+
+def _adapter_cms_hospitals() -> pd.DataFrame:
+    """CMS Hospital Compare — county aggregates (static snapshot)."""
+    from arbok.sources.cms_hospitals import load_cms_hospitals
+    df = load_cms_hospitals()
+    # The CMS loader writes county_fips as a 5-digit area FIPS string already.
+    if "area_fips" in df.columns:
+        df = df.rename(columns={"area_fips": "county"})
+    elif "county" not in df.columns and "county_fips" in df.columns:
+        df = df.rename(columns={"county_fips": "county"})
+        df["county"] = df["county"].astype(str).str.zfill(5)
+    return df.drop(columns=[c for c in ("state_fips",) if c in df.columns], errors="ignore")
+
+
+def _adapter_mit_elections() -> pd.DataFrame:
+    """MIT Election Lab — county presidential vote share, election years."""
+    from arbok.sources.mit_elections import load_elections
+    df = load_elections()
+    if "area_fips" in df.columns:
+        df = df.rename(columns={"area_fips": "county"})
+    return df  # county + year (presidential only, sparse)
+
+
+def _adapter_county_health() -> pd.DataFrame:
+    """County Health Rankings — composite + headline measures (annual)."""
+    from arbok.sources.county_health import load_county_health
+    df = load_county_health()
+    if "area_fips" in df.columns:
+        df = df.rename(columns={"area_fips": "county"})
+    return df  # county + year
+
+
+def _adapter_hud_fmr() -> pd.DataFrame:
+    """HUD Small Area Fair Market Rent — zip-level annual."""
+    from arbok.sources.hud_fmr import load_hud_fmr
+    df = load_hud_fmr(by="zip")
+    return df  # zip + year
+
+
+def _adapter_eia_electricity() -> pd.DataFrame:
+    """EIA residential electricity price per state (monthly)."""
+    from arbok.sources.eia_energy import load_eia_electricity
+    df = load_eia_electricity()
+    return df  # state + year_month — needs state-level broadcast
+
+
+def _adapter_fbi_nibrs() -> pd.DataFrame:
+    """FBI NIBRS / Crime Data Explorer county-year crime rates per 100K.
+
+    Loader produces `area_fips` (5-digit county FIPS) + `year` + per-offense
+    *_per_100k rate columns + reporting-coverage diagnostics.
+    """
+    from arbok.sources.fbi_nibrs import load_nibrs
+    df = load_nibrs()
+    if "area_fips" in df.columns:
+        df = df.rename(columns={"area_fips": "county"})
+    # Drop the split FIPS pieces so the assembler doesn't try to feature-ify them.
+    return df.drop(columns=[c for c in ("state_fips", "county_fips") if c in df.columns])
+    # county + year
+
+
+def _adapter_nces_schools() -> pd.DataFrame:
+    """NCES CCD school-district panel aggregated to county-year.
+
+    The district panel already carries county_fips (from F-33 fiscal CONUM),
+    so we use `aggregate_to_county` to roll districts up with enrollment-
+    weighted rates and summed counts before handing off to the county->zip
+    broadcast in `_apply_spec`.
+    """
+    from arbok.sources.nces_schools import aggregate_to_county, load_schools
+    df = load_schools()
+    county = aggregate_to_county(df)
+    county = county.rename(columns={"county_fips": "county", "school_year_start": "year"})
+    # state_fips comes along from aggregate_to_county; let the assembler's
+    # _NON_FEATURE_COLS strip it from feature naming.
+    return county  # county + year
+
+
 SOURCE_SPECS: list[SourceSpec] = [
     SourceSpec("fred",            "national", "monthly",   VINTAGE_LAGS["fred"],          _adapter_fred,           "fred"),
     SourceSpec("realtor",         "zip",      "monthly",   VINTAGE_LAGS["realtor"],       _adapter_realtor,        "rdc"),
@@ -276,6 +360,14 @@ SOURCE_SPECS: list[SourceSpec] = [
     SourceSpec("bls_laus",        "county",   "monthly",   2,                              _adapter_bls_laus,       "laus"),
     SourceSpec("bea_income",      "county",   "annual",    12,                             _adapter_bea_income,     "bea"),
     SourceSpec("usaspending",     "zip",      "annual",    6,                              _adapter_usaspending,    "usaspending"),
+    SourceSpec("property_tax",    "zip",      "annual",    12,                             _adapter_property_tax,   "ptax"),
+    SourceSpec("cms_hospitals",   "county",   "static",    3,                              _adapter_cms_hospitals,  "cms"),
+    SourceSpec("mit_elections",   "county",   "annual",    3,                              _adapter_mit_elections,  "mit"),
+    SourceSpec("county_health",   "county",   "annual",    6,                              _adapter_county_health,  "health"),
+    SourceSpec("hud_fmr",         "zip",      "annual",    6,                              _adapter_hud_fmr,        "fmr"),
+    SourceSpec("eia_electricity", "state",    "monthly",   2,                              _adapter_eia_electricity, "elec"),
+    SourceSpec("fbi_nibrs",       "county",   "annual",    12,                             _adapter_fbi_nibrs,      "crime"),
+    SourceSpec("nces_schools",    "county",   "annual",    12,                             _adapter_nces_schools,   "school"),
 ]
 
 
@@ -325,6 +417,10 @@ def _apply_spec(spec: SourceSpec, panel: pd.DataFrame, zip_tract: pd.DataFrame, 
     elif spec.level == "cbsa":
         df["cbsa"] = df["cbsa"].astype(str).str.zfill(5)
         # Don't merge to zip yet; defer until after time alignment.
+    elif spec.level == "state":
+        # State-level: map zip -> dominant county -> state FIPS (first 2 chars)
+        df["state_fips"] = df["state_fips"].astype(str).str.zfill(2) if "state_fips" in df.columns else None
+        # Defer the join until after time alignment; merge via zip's dominant county's state.
     elif spec.level == "national":
         pass
     else:
@@ -346,6 +442,18 @@ def _apply_spec(spec: SourceSpec, panel: pd.DataFrame, zip_tract: pd.DataFrame, 
         panel_zc = panel[["zip", "cbsa", "year_month"]].drop_duplicates()
         merge_keys = ["cbsa", "year_month"] if "year_month" in df.columns else ["cbsa"]
         df = panel_zc.merge(df, on=merge_keys, how="left").drop(columns=["cbsa"])
+    elif spec.level == "state":
+        # State -> zip via dominant county's state. Build zip->state from zip_county.
+        zip_state = zip_county.copy()
+        zip_state["state_fips"] = zip_state["county"].str[:2]
+        dom_state = (
+            zip_state.sort_values(["zip", "res_ratio"], ascending=[True, False])
+                     .drop_duplicates(subset=["zip"], keep="first")[["zip", "state_fips"]]
+        )
+        # Merge on state_fips only — many-to-many gives one row per (zip, year_month)
+        # of the state's data. year_month already in df from time alignment above.
+        df = dom_state.merge(df, on="state_fips", how="left")
+        df = df.drop(columns=[c for c in ("state_fips", "state") if c in df.columns])
 
     # 4. Vintage lag shift.
     df = _shift_year_month(df, spec.lag_months)

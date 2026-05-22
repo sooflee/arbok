@@ -45,17 +45,33 @@ def hedonic_predictor(
     Demographic predictors are the textbook baseline for residential RE; if our
     fancy model doesn't beat this, the macro/amenity/climate features aren't earning
     their seat.
+
+    Features are quantile-transformed against the TRAIN distribution before
+    fitting. ACS has known unit drift across vintages (pop_* columns are pop
+    shares pre-2018, raw counts post-2018) which lets test-time values exceed
+    train-time values by >100x. A raw-units linear model amplifies these into
+    multi-hundred-percent predictions; the rank transform clamps them into the
+    train distribution and keeps predictions in a sane range.
     """
     from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import QuantileTransformer
 
     acs_cols = [c for c in X_train.columns if c.startswith("acs__")]
     if not acs_cols:
         return BaselineResult("hedonic_acs", np.full(len(X_test), float(y_train.mean())))
+    scaler = QuantileTransformer(
+        n_quantiles=min(1000, max(10, len(X_train) // 100)),
+        output_distribution="normal",
+        subsample=200_000,
+        random_state=0,
+    )
+    Xtr = scaler.fit_transform(X_train[acs_cols])
+    Xte = scaler.transform(X_test[acs_cols])
     # Ridge (not OLS) — ACS columns are highly collinear (pop_25_29 + pop_30_34 ...)
     # so OLS coefficients explode. alpha=1 is conservative.
     m = Ridge(alpha=1.0)
-    m.fit(X_train[acs_cols], y_train.values)
-    pred = m.predict(X_test[acs_cols])
+    m.fit(Xtr, y_train.values)
+    pred = m.predict(Xte)
     # Clip to plausible-return range (matches training y range with small headroom).
     lo, hi = y_train.quantile(0.001), y_train.quantile(0.999)
     return BaselineResult("hedonic_acs", np.clip(pred, lo, hi))

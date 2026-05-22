@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import pickle
+from typing import Callable, Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 
 from arbok.config import PROCESSED
@@ -112,3 +114,162 @@ def run_all(
                     pickle.dump(arts["elastic"], f)
         print(f"Saved trained models -> {art_dir}/")
     return out, artifacts
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward (rolling-origin) cross-validation
+# ---------------------------------------------------------------------------
+
+
+SplitPair = tuple[np.ndarray, np.ndarray]
+
+
+def build_walk_forward_splits(
+    df: pd.DataFrame,
+    time_col: str,
+    train_until_dates: Sequence[str | pd.Timestamp],
+    test_window_months: int = 12,
+) -> list[SplitPair]:
+    """Construct rolling-origin (train_idx, test_idx) splits from a panel.
+
+    For each cutoff `t` in `train_until_dates`:
+      - train_idx = positional indices where df[time_col] <= t
+      - test_idx  = positional indices where t < df[time_col] <= t + test_window_months
+
+    Indices are POSITIONAL (0..len(df)-1) — usable with `.iloc` and with
+    DataFrames that have been reset / are otherwise positionally addressed.
+    The dataframe is NOT mutated.
+
+    Example (1-year test windows):
+        cutoffs = ["2018-12-31", "2019-12-31", "2020-12-31",
+                   "2021-12-31", "2022-12-31"]
+        splits  = build_walk_forward_splits(df, "year_month", cutoffs, 12)
+    """
+    if time_col not in df.columns:
+        raise ValueError(f"{time_col!r} not in df")
+    times = pd.to_datetime(df[time_col])
+    pos = np.arange(len(df))
+    splits: list[SplitPair] = []
+    for cutoff in train_until_dates:
+        t = pd.Timestamp(cutoff)
+        test_end = t + pd.DateOffset(months=int(test_window_months))
+        train_mask = times <= t
+        test_mask = (times > t) & (times <= test_end)
+        train_idx = pos[train_mask.values]
+        test_idx = pos[test_mask.values]
+        if len(train_idx) == 0 or len(test_idx) == 0:
+            # Skip empty folds (caller can inspect length to detect)
+            continue
+        splits.append((train_idx, test_idx))
+    return splits
+
+
+def walk_forward_cv(
+    df: pd.DataFrame,
+    horizon: str,
+    splits: Sequence[SplitPair],
+    model_fn: Callable[[pd.DataFrame, pd.Series, pd.DataFrame], np.ndarray],
+    metric_fns: dict[str, Callable[[np.ndarray, np.ndarray], float]] | None = None,
+    feature_cols: list[str] | None = None,
+    impute: str | None = "median",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Rolling-origin temporal CV.
+
+    Parameters
+    ----------
+    df : panel including features + horizon target column
+    horizon : target column name (e.g. "fwd_1y")
+    splits : sequence of (train_idx, test_idx) positional-index tuples; use
+        `build_walk_forward_splits` to construct
+    model_fn : callable (X_train, y_train, X_test) -> y_pred. Models can pick
+        their own params. Receives imputed, numeric-only X.
+    metric_fns : optional dict of {name: fn(y_true, y_pred) -> float}. If
+        None, defaults to the standard suite from `arbok.models.eval.evaluate`
+        and the per-fold frame will contain its full set of columns.
+    feature_cols : optional explicit feature column list. If None, all
+        numeric non-target columns minus the standard NON_FEATURE_* set are
+        used (see `arbok.models.prep.feature_columns`).
+    impute : "median" (default) or None. Median imputation uses train-fold
+        statistics only (no leakage).
+
+    Returns
+    -------
+    per_fold : DataFrame indexed by fold with one row per fold and one column
+        per metric.
+    summary : DataFrame indexed by metric with columns
+        [mean, std, q025, q975, n_folds].
+    """
+    from arbok.models.prep import feature_columns  # local import to avoid cycle
+
+    if horizon not in df.columns:
+        raise ValueError(f"{horizon!r} not in df")
+
+    rows = []
+    for fold_i, (tr_idx, te_idx) in enumerate(splits):
+        sub_train = df.iloc[tr_idx]
+        sub_test = df.iloc[te_idx]
+
+        # Drop rows where target is missing on each side
+        tr_mask = sub_train[horizon].notna()
+        te_mask = sub_test[horizon].notna()
+        sub_train = sub_train.loc[tr_mask]
+        sub_test = sub_test.loc[te_mask]
+        if len(sub_train) == 0 or len(sub_test) == 0:
+            continue
+
+        feats = list(feature_cols) if feature_cols is not None else feature_columns(sub_train)
+        feats = [f for f in feats if f != horizon and f in sub_test.columns]
+
+        X_tr = sub_train[feats]
+        y_tr = sub_train[horizon].astype(float)
+        X_te = sub_test[feats]
+        y_te = sub_test[horizon].astype(float).values
+
+        if impute == "median":
+            med = X_tr.median(numeric_only=True)
+            X_tr = X_tr.fillna(med)
+            X_te = X_te.fillna(med)
+            still_na = X_tr.columns[X_tr.isna().any()].tolist()
+            if still_na:
+                X_tr = X_tr.drop(columns=still_na)
+                X_te = X_te.drop(columns=still_na, errors="ignore")
+            nunique = X_tr.nunique(dropna=False)
+            zero_var = nunique[nunique <= 1].index.tolist()
+            if zero_var:
+                X_tr = X_tr.drop(columns=zero_var)
+                X_te = X_te.drop(columns=zero_var, errors="ignore")
+
+        y_pred = np.asarray(model_fn(X_tr, y_tr, X_te), dtype=float)
+        y_true = np.asarray(y_te, dtype=float)
+        mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        y_true, y_pred = y_true[mask], y_pred[mask]
+
+        if metric_fns is None:
+            metrics = evaluate(y_true, y_pred, name=f"fold_{fold_i}")
+            metrics.pop("model", None)
+        else:
+            metrics = {name: float(fn(y_true, y_pred)) for name, fn in metric_fns.items()}
+            metrics["n"] = int(len(y_true))
+
+        metrics["fold"] = fold_i
+        metrics["n_train"] = int(len(sub_train))
+        metrics["n_test"] = int(len(sub_test))
+        rows.append(metrics)
+
+    if not rows:
+        return pd.DataFrame(), pd.DataFrame()
+
+    per_fold = pd.DataFrame(rows).set_index("fold")
+
+    # Summary stats across folds (numeric cols only)
+    numeric = per_fold.select_dtypes(include=[np.number])
+    summary = pd.DataFrame(
+        {
+            "mean": numeric.mean(),
+            "std": numeric.std(ddof=1),
+            "q025": numeric.quantile(0.025),
+            "q975": numeric.quantile(0.975),
+            "n_folds": numeric.notna().sum().astype(int),
+        }
+    )
+    return per_fold, summary

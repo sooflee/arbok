@@ -91,12 +91,16 @@ def fetch_series(series_id: str, api_key: str | None = None) -> pd.DataFrame:
     if not data:
         raise ValueError(f"EIA returned no rows for {series_id!r}")
     df = pd.DataFrame(data)
-    if "value" not in df.columns or "period" not in df.columns:
+    # EIA v2 has migrated from `value` to per-dataset value column names
+    # (`price` for electricity, `value` for retail gasoline). Pick whichever
+    # numeric value column is present.
+    value_col = next((c for c in ("value", "price") if c in df.columns), None)
+    if "period" not in df.columns or value_col is None:
         raise ValueError(
             f"EIA response for {series_id!r} missing period/value cols: "
             f"{list(df.columns)}"
         )
-    df = df[["period", "value"]].copy()
+    df = df[["period", value_col]].rename(columns={value_col: "value"}).copy()
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     df = df.dropna(subset=["value"]).reset_index(drop=True)
     df.to_csv(_cache_path(series_id), index=False)
