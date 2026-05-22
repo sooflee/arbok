@@ -39,3 +39,9 @@ fema__disasters_10yr_tornado
 nri__flood_risk_combined
 nri__wildfire_risk
 nri__composite_risk
+derived__derived__vol_24m
+derived__derived__drawdown
+afdc__afdc__station_count
+afdc__afdc__l2_ports
+afdc__afdc__dcfc_ports
+wiki__wiki_pageviews

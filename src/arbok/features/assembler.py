@@ -194,6 +194,67 @@ def _adapter_foursquare() -> pd.DataFrame:
     return load_foursquare_pois()  # zip, static
 
 
+def _adapter_derived() -> pd.DataFrame:
+    """Panel-derived features (ZORI yield, rolling volatility, drawdown)."""
+    from arbok.features.derived import load_derived
+    return load_derived()  # zip + year_month
+
+
+def _adapter_afdc_ev() -> pd.DataFrame:
+    """DOE AFDC EV-station counts per zip (snapshot)."""
+    from arbok.sources.doe_afdc import load_afdc
+    return load_afdc()  # zip, static
+
+
+def _adapter_zbp() -> pd.DataFrame:
+    """Census Zip Business Patterns — establishments + employment per zip."""
+    from arbok.sources.census_zbp import load_zbp
+    return load_zbp()  # zip + year (snapshot, last avail 2018)
+
+
+def _adapter_epa_aqs() -> pd.DataFrame:
+    """EPA AQS air quality — PM2.5 + ozone annual at county."""
+    from arbok.sources.epa_aqs import load_epa_aqs
+    df = load_epa_aqs()
+    df["county"] = df["state_fips"].astype(str).str.zfill(2) + df["county_fips"].astype(str).str.zfill(3)
+    return df  # county + year
+
+
+def _adapter_wikipedia() -> pd.DataFrame:
+    """Wikipedia monthly pageviews per metro Wikipedia article — search-interest proxy."""
+    from arbok.sources.wikipedia_pageviews import load_pageviews
+    df = load_pageviews()
+    df = df.rename(columns={"views": "wiki_pageviews"})
+    return df  # cbsa + year_month
+
+
+def _adapter_bls_laus() -> pd.DataFrame:
+    """BLS Local Area Unemployment Statistics — county-monthly unemployment rate."""
+    from arbok.sources.bls_laus import load_laus
+    df = load_laus()
+    if "area_fips" in df.columns:
+        df = df.rename(columns={"area_fips": "county"})
+    return df  # county + year_month
+
+
+def _adapter_bea_income() -> pd.DataFrame:
+    """BEA county per-capita personal income (annual)."""
+    from arbok.sources.bea_income import load_bea_income
+    df = load_bea_income()
+    if "area_fips" in df.columns:
+        df = df.rename(columns={"area_fips": "county"})
+    return df  # county + year
+
+
+def _adapter_usaspending() -> pd.DataFrame:
+    """USAspending — federal contract + grant $ flowing into the zip annually."""
+    from arbok.sources.usaspending import load_usaspending
+    df = load_usaspending()
+    if "fiscal_year" in df.columns:
+        df = df.rename(columns={"fiscal_year": "year"})
+    return df  # zip + year
+
+
 SOURCE_SPECS: list[SourceSpec] = [
     SourceSpec("fred",            "national", "monthly",   VINTAGE_LAGS["fred"],          _adapter_fred,           "fred"),
     SourceSpec("realtor",         "zip",      "monthly",   VINTAGE_LAGS["realtor"],       _adapter_realtor,        "rdc"),
@@ -207,6 +268,14 @@ SOURCE_SPECS: list[SourceSpec] = [
     SourceSpec("fema_nri",        "tract",    "static",    VINTAGE_LAGS["fema_nri"],      _adapter_fema_nri,       "nri"),
     SourceSpec("noaa_viirs",      "zcta",     "annual",    VINTAGE_LAGS["noaa_viirs"],    _adapter_noaa_viirs,     "viirs"),
     SourceSpec("foursquare",      "zip",      "static",    VINTAGE_LAGS["foursquare"],    _adapter_foursquare,     "fsq"),
+    SourceSpec("derived",         "zip",      "monthly",   1,                              _adapter_derived,        "derived"),
+    SourceSpec("afdc_ev",         "zip",      "static",    3,                              _adapter_afdc_ev,        "afdc"),
+    SourceSpec("zbp",             "zip",      "annual",    12,                             _adapter_zbp,            "zbp"),
+    SourceSpec("epa_aqs",         "county",   "annual",    12,                             _adapter_epa_aqs,        "aqs"),
+    SourceSpec("wikipedia",       "cbsa",     "monthly",   1,                              _adapter_wikipedia,      "wiki"),
+    SourceSpec("bls_laus",        "county",   "monthly",   2,                              _adapter_bls_laus,       "laus"),
+    SourceSpec("bea_income",      "county",   "annual",    12,                             _adapter_bea_income,     "bea"),
+    SourceSpec("usaspending",     "zip",      "annual",    6,                              _adapter_usaspending,    "usaspending"),
 ]
 
 
@@ -321,9 +390,12 @@ def build_feature_store(
         try:
             piece = _apply_spec(spec, panel, zip_tract, zip_county)
         except FileNotFoundError as e:
-            print(f"[skip] {spec.name}: {e}")
+            print(f"[skip] {spec.name}: parquet missing — {e}")
             continue
         except NotImplementedError:
+            continue
+        except Exception as e:  # adapter schema mismatch, KeyError, etc.
+            print(f"[skip] {spec.name}: adapter error ({type(e).__name__}: {e})")
             continue
         keys = ["zip", "year_month"] if spec.level != "national" else ["year_month"]
         fs = fs.merge(piece, on=keys, how="left")

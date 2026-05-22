@@ -21,11 +21,13 @@ import plotly.io as pio
 import shap
 
 from arbok.config import PROCESSED
+from arbok.labels import label as feat_label
 
 ARTIFACTS = PROCESSED / "phase2_artifacts"
 RESULTS = pd.read_parquet(PROCESSED / "phase2_results.parquet")
 LEADERBOARD = pd.read_parquet(PROCESSED / "zip_leaderboard.parquet")
 FS = pd.read_parquet(PROCESSED / "feature_store_zip_month.parquet")
+ZIP_GEO = pd.read_parquet(PROCESSED / "zip_geo.parquet") if (PROCESSED / "zip_geo.parquet").exists() else None
 
 HORIZONS = ["fwd_1y", "fwd_3y", "fwd_5y"]
 HORIZON_CLASS = {"fwd_1y": "short (1y)", "fwd_3y": "medium (3y)", "fwd_5y": "long (5y)"}
@@ -74,33 +76,84 @@ def chart_shap_for(horizon: str, split: str = "post_2012", k: int = 15) -> go.Fi
         pd.DataFrame({"feature": features, "mean_abs_shap": mean_abs})
         .sort_values("mean_abs_shap", ascending=True)
         .tail(k)
+        .reset_index(drop=True)
     )
+    # Map raw column names -> (display, description) for hover tooltips.
+    top["display"] = top["feature"].apply(lambda f: feat_label(f)[0])
+    top["description"] = top["feature"].apply(lambda f: feat_label(f)[1])
+
     fig = go.Figure(
-        go.Bar(x=top["mean_abs_shap"], y=top["feature"], orientation="h",
-               marker_color="#3a5da9")
+        go.Bar(
+            x=top["mean_abs_shap"],
+            y=top["display"],
+            orientation="h",
+            marker_color="#3a5da9",
+            customdata=top[["feature", "description"]].values,
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "<i>%{customdata[0]}</i><br>"
+                "mean |SHAP|: %{x:.4f}<br><br>"
+                "%{customdata[1]}<extra></extra>"
+            ),
+        )
     )
     fig.update_layout(
-        title=f"Top {k} SHAP features — {horizon} @ {split}",
-        xaxis_title="mean |SHAP|", yaxis_title="", height=460,
-        margin=dict(l=200, r=20, t=60, b=40),
+        title=f"Top {k} SHAP features — {horizon} @ {split}  ·  hover for description",
+        xaxis_title="mean |SHAP| (avg per-zip prediction contribution)", yaxis_title="",
+        height=460, margin=dict(l=240, r=20, t=60, b=40),
     )
     return fig
 
 
+def _humanize_drivers(s: str) -> str:
+    """Turn 'fred.real_rate_10y(-0.040), nri.wildfire_risk(+0.009)' into '10Y real rate (-0.040), NRI wildfire risk (+0.009)'."""
+    if not isinstance(s, str):
+        return ""
+    out_parts = []
+    for part in s.split(", "):
+        # parse 'fred.real_rate_10y(-0.040)' -> ('fred.real_rate_10y', '-0.040')
+        if "(" in part:
+            name, num = part.rsplit("(", 1)
+            num = "(" + num
+        else:
+            name, num = part, ""
+        raw = name.replace(".", "__")
+        display, desc = feat_label(raw)
+        out_parts.append(f"<span title='{escape(desc)}'>{escape(display)}</span> <code>{escape(num)}</code>")
+    return ", ".join(out_parts)
+
+
 def chart_leaderboard_top_n(n: int = 20) -> str:
-    """Return an HTML <table> string with top-n zips."""
+    """Return an HTML <table> string with top-n zips, including city/state lookup + human drivers."""
     df = LEADERBOARD.head(n).copy()
-    df["zhvi"] = df["zhvi"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
-    df["zori"] = df["zori"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
-    df["predicted"] = df["predicted_fwd_3y_annualized"].apply(lambda x: f"{x*100:+.2f}%")
-    df = df[["zip", "cbsa", "zhvi", "zori", "predicted", "drivers"]]
-    df.columns = ["ZIP", "CBSA", "ZHVI", "ZORI", "Pred fwd_3y ann.", "Top SHAP drivers (feature → contribution)"]
-    rows = "".join(
-        "<tr>" + "".join(f"<td>{escape(str(v))}</td>" for v in row) + "</tr>"
-        for row in df.values
+    # Attach city/state from the HUD zip-geo lookup
+    if ZIP_GEO is not None:
+        df = df.merge(ZIP_GEO[["zip", "city", "state"]], on="zip", how="left")
+    else:
+        df["city"] = ""
+        df["state"] = ""
+    df["location"] = df.apply(
+        lambda r: f"{r['city']}, {r['state']}" if pd.notna(r.get("city")) and r["city"] else "—",
+        axis=1,
     )
+    df["zhvi_fmt"] = df["zhvi"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
+    df["zori_fmt"] = df["zori"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
+    df["predicted"] = df["predicted_fwd_3y_annualized"].apply(lambda x: f"{x*100:+.2f}%")
+    df["drivers_html"] = df["drivers"].apply(_humanize_drivers)
+    df = df[["zip", "location", "cbsa", "zhvi_fmt", "zori_fmt", "predicted", "drivers_html"]]
+    df.columns = ["ZIP", "City, State", "CBSA", "ZHVI", "ZORI", "Pred fwd_3y ann.", "Top SHAP drivers (hover for feature description)"]
+    rows = []
+    for row in df.values:
+        cells = []
+        for col_idx, v in enumerate(row):
+            # drivers column already has HTML; everything else escapes
+            if col_idx == len(row) - 1:
+                cells.append(f"<td>{v}</td>")
+            else:
+                cells.append(f"<td>{escape(str(v))}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
     head = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in df.columns) + "</tr>"
-    return f"<table class='leaderboard'>{head}{rows}</table>"
+    return f"<table class='leaderboard'>{head}{''.join(rows)}</table>"
 
 
 def chart_headline_table() -> str:
@@ -159,7 +212,8 @@ def main() -> None:
     table.headline td:nth-child(4) {{ font-weight: bold; color: #2c5282; }}
     table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace;
                          font-size: .82em; }}
-    table.leaderboard td:nth-child(5) {{ font-weight: bold; }}
+    table.leaderboard td:nth-child(6) {{ font-weight: bold; color: #2c5282; }}
+    table.leaderboard span[title] {{ border-bottom: 1px dotted #999; cursor: help; }}
     .meta {{ color: #666; font-size: .9em; margin-bottom: 1.8em; }}
     .tldr {{ background: #f3f5f9; border-left: 4px solid #2c5282;
              padding: 1em 1.4em; margin: 1.5em 0; border-radius: 0 4px 4px 0; }}
@@ -246,21 +300,33 @@ def main() -> None:
      experiment each.</p>
 
   <h3>What's in the feature pool right now</h3>
-  <p>8 of 12 starter-pack data sources are joined for this run, producing 41 modeling features. The other
-     4 modules are coded but pending manual downloads or extra credentials (HMDA, FCC broadband,
-     NOAA VIIRS nightlights, Foursquare POIs).</p>
+  <p>The current feature store covers 14+ data sources organized into 10 thematic classes,
+     producing ~50 modeling features after coverage filtering. Hover over any feature name in the
+     SHAP charts below for a one-line description.</p>
   <ul>
-    <li><b>Macro / rates:</b> 30Y mortgage, 10Y TIPS, M2, Case-Shiller, lumber, unemployment + their
-        1/3/12-month deltas (FRED)</li>
-    <li><b>Inventory:</b> months-of-supply, days-on-market, price cuts per zip (Realtor.com)</li>
+    <li><b>Macro / rates:</b> 30Y mortgage, 10Y TIPS, M2, Case-Shiller, lumber, US unemployment +
+        their 1/3/12-month deltas (FRED)</li>
+    <li><b>Inventory:</b> months-of-supply, days-on-market, price cuts, active/new/pending
+        listings per zip (Realtor.com)</li>
     <li><b>Demographics:</b> population by age cohort, household income, education, home value,
         rent, owner-occupancy at ZCTA (Census ACS, 10 vintages 2013-2022)</li>
     <li><b>Migration:</b> county-to-county AGI flow (IRS SOI)</li>
-    <li><b>Supply:</b> building permits at MSA (Census BPS)</li>
-    <li><b>Jobs:</b> wages + YoY growth at county (BLS QCEW)</li>
+    <li><b>Supply:</b> building permits at MSA (Census BPS); business establishments + employment
+        per zip (Census ZBP)</li>
+    <li><b>Jobs:</b> wages + YoY growth at county (BLS QCEW); monthly unemployment rate at county
+        (BLS LAUS)</li>
     <li><b>Climate:</b> trailing-10-year disaster declarations by category (OpenFEMA); flood, wildfire,
-        hurricane, heatwave risk scores at tract (FEMA NRI)</li>
+        hurricane, heatwave risk scores at tract (FEMA NRI); annual PM2.5 + ozone air quality
+        (EPA AQS)</li>
+    <li><b>Amenities + infrastructure:</b> EV charging stations per zip (DOE AFDC)</li>
+    <li><b>Behavioral:</b> monthly Wikipedia pageviews per metro article (search-interest proxy)</li>
+    <li><b>Derived (no new data):</b> gross rental yield = 12 × ZORI / ZHVI; rolling 24-mo ZHVI
+        volatility; ZHVI drawdown vs trailing-60-mo peak</li>
   </ul>
+  <p>Pending modules with code ready but waiting on user-supplied credentials / manual downloads:
+     HMDA (tract-level mortgage records — currently only state-level aggregations), FCC BDC broadband,
+     NOAA VIIRS satellite nightlights, Foursquare POIs (Whole Foods / coffee / breweries), BEA
+     per-capita income, USAspending federal $ flows.</p>
 
   <h2>Headline results</h2>
   <p>The table below picks the best-performing model for each horizon on the post-2012 split (the larger
@@ -319,11 +385,11 @@ def main() -> None:
   </ul>
 
   <h2>3 · Where might the model want to buy today?</h2>
-  <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the top-200
-     metros at the most recent month with enough feature coverage to make a confident prediction
-     (December 2023, ≈13,000 zips). The table below lists the top 20. The driver column shows the
-     three features that contributed most to that zip's predicted return — these are per-zip SHAP
-     contributions, not the global feature ranking above.</p>
+  <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
+     <b>top-100</b> US metros at the most recent month with enough feature coverage to make a confident
+     prediction. The table below lists the top 20 picks. The driver column shows the three features
+     that contributed most to that zip's predicted return — these are per-zip SHAP contributions, not
+     the global feature ranking above. <b>Hover over any feature</b> to see its description.</p>
   {leaderboard_html}
 
   <div class='caveat'>

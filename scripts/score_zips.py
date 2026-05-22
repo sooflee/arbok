@@ -17,6 +17,7 @@ from arbok.config import PROCESSED
 HORIZON = "fwd_3y"
 SPLIT = "post_2012"
 TOP_N = 50
+TOP_METROS_FILTER = 100  # restrict leaderboard to zips in the top-N metros by population
 
 ARTIFACTS = PROCESSED / "phase2_artifacts"
 MODEL_PATH = ARTIFACTS / f"{HORIZON}__{SPLIT}__lgbm.txt"
@@ -43,6 +44,12 @@ print(f"Scoring as of: {latest}  ({counts.loc[latest]:,} zips with >=80% feature
 
 snapshot = fs[fs["year_month"] == latest].copy()
 print(f"Snapshot rows: {len(snapshot):,}")
+
+# Restrict to top-N metros so leaderboard surfaces zips in larger cities.
+from arbok.sources.census_metros import load_top200
+top_metros = load_top200().head(TOP_METROS_FILTER)
+snapshot = snapshot[snapshot["cbsa"].isin(top_metros["cbsa"])].copy()
+print(f"After top-{TOP_METROS_FILTER}-metro filter: {len(snapshot):,} rows")
 
 # Impute features with column medians (no leakage — this is just for scoring)
 X = snapshot[features].copy()
