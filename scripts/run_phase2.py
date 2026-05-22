@@ -1,4 +1,8 @@
-"""Phase 2 entry: train baselines + ElasticNet + LightGBM per horizon x split."""
+"""Phase 2 entry: train baselines + ElasticNet + LightGBM per horizon x split.
+
+Runs TWO passes: raw features (macro/time + spatial mixed) and CBSA-month-demeaned
+features (pure spatial signal). Both are saved separately to data/processed/.
+"""
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -10,18 +14,17 @@ from arbok.models.run import run_all
 fs = pd.read_parquet(PROCESSED / "feature_store_zip_month.parquet")
 print(f"feature store loaded: {fs.shape}")
 
-results, artifacts = run_all(fs)
-print("\n\n=== SUMMARY (sorted by decile_spread within each horizon x split) ===")
-print(results.sort_values(["horizon", "split", "decile_spread"], ascending=[True, True, False]).to_string(index=False))
+print("\n" + "=" * 70)
+print("PASS 1: raw features (macro + spatial mixed)")
+print("=" * 70)
+raw_results, _ = run_all(fs, spatial_demean=False)
 
-# Print top SHAP features per LGBM model
-print("\n\n=== Top SHAP features per horizon x split (LightGBM) ===")
-for (horizon, split_name), arts in artifacts.items():
-    lgbm = arts.get("lgbm")
-    if lgbm is None:
-        continue
-    print(f"\n--- {horizon} @ {split_name} ---")
-    fs_train_idx = fs[fs[f"is_train_{split_name}"].fillna(False) & fs[horizon].notna()].index
-    X = fs.loc[fs_train_idx, arts["feats"]].fillna(fs.loc[fs_train_idx, arts["feats"]].median(numeric_only=True))
-    shap_top = lgbm.shap_top_k(X, k=15)
-    print(shap_top.to_string(index=False))
+print("\n" + "=" * 70)
+print("PASS 2: CBSA-month-demeaned features (pure within-metro spatial signal)")
+print("=" * 70)
+demean_results, _ = run_all(fs, spatial_demean=True)
+
+print("\n\n=== SIDE-BY-SIDE: raw vs demeaned (decile_spread, post_2012 LightGBM) ===")
+both = pd.concat([raw_results, demean_results])
+key = both[(both["split"] == "post_2012") & (both["model"] == "lightgbm")]
+print(key.pivot_table(index="horizon", columns="demean", values=["spearman", "decile_spread"]).round(4))

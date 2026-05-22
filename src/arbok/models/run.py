@@ -12,7 +12,7 @@ from arbok.models.baselines import hedonic_predictor, metro_mean_predictor, over
 from arbok.models.elastic import fit_elasticnet
 from arbok.models.eval import evaluate, results_table
 from arbok.models.lgbm import fit_lightgbm
-from arbok.models.prep import SPLITS_AVAIL, Split, build_xy
+from arbok.models.prep import SPLITS_AVAIL, Split, build_xy, spatial_demean_features
 
 # fwd_1y = short, fwd_3y = medium, fwd_5y = long
 DEFAULT_HORIZONS = ("fwd_1y", "fwd_3y", "fwd_5y")
@@ -69,8 +69,19 @@ def run_all(
     splits: tuple[Split, ...] = SPLITS_AVAIL,
     min_coverage: float = 0.10,
     save: bool = True,
+    spatial_demean: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
-    """Run the full grid; return a long-form results frame keyed by (horizon, split)."""
+    """Run the full grid; return a long-form results frame keyed by (horizon, split).
+
+    When `spatial_demean=True`, both features and targets are CBSA-month-demeaned BEFORE
+    training. Targets become "excess return vs metro" and features become "this zip's
+    deviation from its metro neighbors." Useful for picking BETWEEN zips inside a metro;
+    NOT useful for picking BETWEEN metros (the macro signal is zeroed out by construction).
+    """
+    if spatial_demean:
+        print("\n*** SPATIAL DEMEAN ENABLED: targets and features demeaned by (cbsa, year_month) ***")
+        fs = spatial_demean_features(fs, target_cols=list(horizons))
+
     rows = []
     artifacts: dict[tuple[str, str], dict] = {}
     for horizon in horizons:
@@ -78,24 +89,26 @@ def run_all(
             tbl, arts = run_one(fs, horizon, split, min_coverage)
             if not tbl.empty:
                 for row in tbl.reset_index().to_dict("records"):
-                    rows.append({"horizon": horizon, "split": split.name, **row})
+                    rows.append({"horizon": horizon, "split": split.name,
+                                 "demean": spatial_demean, **row})
                 artifacts[(horizon, split.name)] = arts
     out = pd.DataFrame(rows)
     if save:
-        path = PROCESSED / "phase2_results.parquet"
+        suffix = "_demeaned" if spatial_demean else ""
+        path = PROCESSED / f"phase2_results{suffix}.parquet"
         out.to_parquet(path, index=False)
         print(f"\nSaved results -> {path}")
-        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        art_dir = PROCESSED / f"phase2_artifacts{suffix}"
+        art_dir.mkdir(parents=True, exist_ok=True)
         for (horizon, split_name), arts in artifacts.items():
             slug = f"{horizon}__{split_name}"
-            # Save LightGBM as text + features; ElasticNet as pickle.
             if "lgbm" in arts:
-                arts["lgbm"].model.save_model(str(ARTIFACTS / f"{slug}__lgbm.txt"))
-                (ARTIFACTS / f"{slug}__lgbm.features.txt").write_text(
+                arts["lgbm"].model.save_model(str(art_dir / f"{slug}__lgbm.txt"))
+                (art_dir / f"{slug}__lgbm.features.txt").write_text(
                     "\n".join(arts["lgbm"].feature_names)
                 )
             if "elastic" in arts:
-                with open(ARTIFACTS / f"{slug}__elastic.pkl", "wb") as f:
+                with open(art_dir / f"{slug}__elastic.pkl", "wb") as f:
                     pickle.dump(arts["elastic"], f)
-        print(f"Saved trained models -> {ARTIFACTS}/")
+        print(f"Saved trained models -> {art_dir}/")
     return out, artifacts

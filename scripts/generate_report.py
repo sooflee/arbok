@@ -142,52 +142,246 @@ def main() -> None:
 <html lang='en'>
 <head>
   <meta charset='utf-8'>
-  <title>arbok — residential RE predictor study</title>
+  <title>arbok — what predicts US residential real-estate returns?</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
-            max-width: 1100px; margin: 2em auto; color: #1a1a1a; padding: 0 1em; }}
-    h1 {{ border-bottom: 2px solid #1a1a1a; padding-bottom: .3em; }}
-    h2 {{ margin-top: 2.2em; color: #2c5282; }}
+            max-width: 1100px; margin: 2em auto; color: #1a1a1a; padding: 0 1em;
+            line-height: 1.55; }}
+    h1 {{ border-bottom: 2px solid #1a1a1a; padding-bottom: .3em; margin-bottom: .2em; }}
+    h2 {{ margin-top: 2.2em; color: #2c5282; padding-bottom: .2em;
+          border-bottom: 1px solid #e0e6ef; }}
+    h3 {{ color: #2c5282; margin-top: 1.8em; }}
+    p {{ margin: .8em 0; }}
     table {{ border-collapse: collapse; margin: 1em 0; }}
-    th, td {{ padding: .35em .8em; border-bottom: 1px solid #ddd; text-align: left; font-size: .92em; }}
+    th, td {{ padding: .35em .8em; border-bottom: 1px solid #ddd; text-align: left;
+              font-size: .92em; }}
     th {{ background: #f3f5f9; }}
     table.headline td:nth-child(4) {{ font-weight: bold; color: #2c5282; }}
-    table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace; font-size: .82em; }}
+    table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace;
+                         font-size: .82em; }}
     table.leaderboard td:nth-child(5) {{ font-weight: bold; }}
-    .meta {{ color: #666; font-size: .9em; }}
-    .footnote {{ color: #666; font-size: .85em; margin-top: 2em;
+    .meta {{ color: #666; font-size: .9em; margin-bottom: 1.8em; }}
+    .tldr {{ background: #f3f5f9; border-left: 4px solid #2c5282;
+             padding: 1em 1.4em; margin: 1.5em 0; border-radius: 0 4px 4px 0; }}
+    .tldr h3 {{ margin-top: 0; color: #2c5282; }}
+    .caveat {{ background: #fff8e6; border-left: 4px solid #c9a227;
+               padding: .9em 1.2em; margin: 1.2em 0; font-size: .93em;
+               border-radius: 0 4px 4px 0; }}
+    .glossary dt {{ font-weight: 600; margin-top: .8em; color: #2c5282;
+                    font-family: ui-monospace, 'SF Mono', monospace; }}
+    .glossary dd {{ margin: .2em 0 .2em 1.5em; }}
+    code {{ background: #f3f5f9; padding: 1px 5px; border-radius: 3px;
+            font-size: .9em; }}
+    .footnote {{ color: #666; font-size: .85em; margin-top: 3em;
                  border-top: 1px solid #eee; padding-top: 1em; }}
+    ul {{ margin: .4em 0; }}
+    li {{ margin: .2em 0; }}
   </style>
 </head>
 <body>
-  <h1>arbok — residential RE predictor study</h1>
-  <p class='meta'>Generated 2026-05-21. 3.73M zip-month panel · 200 metros · 8 of 12 sources joined ·
-     post_2012 split: train ≤2017-12, test 2018-2024.</p>
+  <h1>What predicts US residential real-estate returns?</h1>
+  <p class='meta'>arbok study · generated 2026-05-21 · all data from free / public sources</p>
 
-  <h2>Headline (post_2012 split, best model per horizon)</h2>
+  <div class='tldr'>
+    <h3>TL;DR</h3>
+    <ul>
+      <li>Built a 3.73-million-row panel of every zip code in the top 200 US metros, monthly, 2000-2026,
+          joined with 50+ candidate predictors organized into 10 thematic classes (macro, demographics,
+          climate, supply, amenities, etc.).</li>
+      <li>Trained gradient-boosted models to predict 1-, 3-, and 5-year forward home-price returns
+          per zip on two backtest windows: pre-2008 (GFC stress test) and post-2012 (rate-shock + COVID).</li>
+      <li><b>Best signal:</b> 3-year horizon, post-2012 split. Top decile of model-predicted zips averaged
+          <b>9.7% annualized</b> realized returns vs. bottom decile <b>3.0%</b> — a 6.75-point spread
+          out of sample.</li>
+      <li><b>The most surprising winner:</b> climate exposure (FEMA disaster history + NRI wildfire/flood
+          scores) ranks in the top 10 predictors for <i>every</i> horizon. Underweighted in standard
+          real-estate analysis.</li>
+      <li><b>The expected winners:</b> real interest rates dominate medium and long horizons;
+          M2 money supply and lumber prices dominate short.</li>
+    </ul>
+  </div>
+
+  <h2>Why this study exists</h2>
+  <p>Residential real estate is the largest asset class most people will ever own, and the conventional
+     wisdom for picking <i>where</i> and <i>when</i> to buy is dominated by qualitative heuristics
+     (school districts, "up-and-coming neighborhoods", proximity to Whole Foods) or single-metric proxies
+     (population growth, median income). This study asks: which of these signals actually predict
+     forward returns, and by how much, separated by time horizon — and are there underweighted predictors
+     that the textbook approach misses?</p>
+
+  <p>The framing is deliberately quantitative. Instead of picking predictors a priori, we cast a wide
+     net (50+ candidates across 10 thematic classes) and let out-of-sample model performance and
+     SHAP attribution tell us what works.</p>
+
+  <h2>The setup in one minute</h2>
+
+  <h3>What we predict</h3>
+  <p>For each zip code at each month, we compute the forward home-price return (Zillow ZHVI index) over
+     three horizons — 1 year, 3 years, 5 years — annualized for the latter two. These are the
+     <i>targets</i> our models try to learn from upstream features.</p>
+
+  <h3>How we predict it</h3>
+  <p>For each (zip, month) row, we join a wide set of features that were <i>knowable at that time</i>
+     (with explicit publication-lag adjustment per source — e.g., HMDA mortgage data isn't available
+     until 9 months after the year it describes). We then train two families of models per horizon:</p>
+  <ul>
+    <li><b>Baselines:</b> predict the global mean; predict the within-metro mean; OLS regression on
+        Census demographics only ("hedonic"). These are what a real model has to beat to claim it's
+        learning anything.</li>
+    <li><b>Real models:</b> ElasticNet (regularized linear, interpretable) and LightGBM (gradient-boosted
+        trees, captures interactions). Both report Spearman rank correlation and decile spread on
+        out-of-sample test data; LightGBM additionally produces SHAP feature attributions.</li>
+  </ul>
+
+  <h3>How we validate</h3>
+  <p>Two temporal splits, both reported in this run:</p>
+  <ul>
+    <li><b>pre_2008 split:</b> train on data through 2007-12, test on 2008-2013. Stress-tests
+        whether the model breaks across the housing-crisis regime change.</li>
+    <li><b>post_2012 split:</b> train through 2017-12, test on 2018-2024. Stress-tests across the
+        2022 rate shock + COVID demand surge.</li>
+  </ul>
+  <p>A future improvement is spatial cross-validation (hold out entire metros instead of just future
+     months) and walk-forward CV (rolling refit). The current splits are honest but a single
+     experiment each.</p>
+
+  <h3>What's in the feature pool right now</h3>
+  <p>8 of 12 starter-pack data sources are joined for this run, producing 41 modeling features. The other
+     4 modules are coded but pending manual downloads or extra credentials (HMDA, FCC broadband,
+     NOAA VIIRS nightlights, Foursquare POIs).</p>
+  <ul>
+    <li><b>Macro / rates:</b> 30Y mortgage, 10Y TIPS, M2, Case-Shiller, lumber, unemployment + their
+        1/3/12-month deltas (FRED)</li>
+    <li><b>Inventory:</b> months-of-supply, days-on-market, price cuts per zip (Realtor.com)</li>
+    <li><b>Demographics:</b> population by age cohort, household income, education, home value,
+        rent, owner-occupancy at ZCTA (Census ACS, 10 vintages 2013-2022)</li>
+    <li><b>Migration:</b> county-to-county AGI flow (IRS SOI)</li>
+    <li><b>Supply:</b> building permits at MSA (Census BPS)</li>
+    <li><b>Jobs:</b> wages + YoY growth at county (BLS QCEW)</li>
+    <li><b>Climate:</b> trailing-10-year disaster declarations by category (OpenFEMA); flood, wildfire,
+        hurricane, heatwave risk scores at tract (FEMA NRI)</li>
+  </ul>
+
+  <h2>Headline results</h2>
+  <p>The table below picks the best-performing model for each horizon on the post-2012 split (the larger
+     and more recent of the two test windows).</p>
   {headline_html}
 
-  <h2>1 · Decile spread by horizon × split × model</h2>
-  <p>The actionable metric: difference between mean realized return of top-decile and bottom-decile
-     predicted zips. R² is negative everywhere because test windows are crisis regimes — decile
-     spread + Spearman are what matter.</p>
-  {_div(decile, include_js=True)}
+  <h3>How to read this</h3>
+  <ul>
+    <li><b>Spearman ρ</b> measures rank correlation: did the model order zips correctly from worst-
+        to best-expected return? Range -1 (perfectly anti-ranked) to +1 (perfectly ranked).
+        +0.3 is meaningful for noisy financial data.</li>
+    <li><b>Decile spread</b> is the most actionable metric: if you bought zips the model ranked in
+        the top 10% versus the bottom 10%, how much better did you do? +6.75% means the top decile
+        averaged 9.70% annualized vs. 2.95% in the bottom — a meaningful gap.</li>
+  </ul>
 
-  <h2>2 · Top SHAP features per horizon (post_2012, LightGBM)</h2>
-  <p>Climate features (FEMA fire/hurricane, NRI wildfire) appear in the top 10 for every horizon —
-     this validates the design-doc thesis that climate is the underweighted sleeper predictor bucket.
-     Real rates (FRED) dominate medium / long horizons; M2 + lumber dominate short.</p>
+  <div class='caveat'>
+    <b>Why R² is not reported as the primary metric:</b> traditional R² is negative on both test windows
+    for nearly every model. This is not a model failure — it's a property of the test windows. Both
+    test periods contain regime shifts (housing crash; rate shock + COVID) where the mean realized return
+    is very different from the training period. Any model that predicts near the training mean gets
+    penalized hard on R². <i>Spatial ranking</i> (Spearman + decile spread) is intact and is what
+    matters for a buy-this-zip-not-that-zip decision.
+  </div>
+
+  <h2>1 · Decile spread, every model × horizon × split</h2>
+  <p>Each bar is one model on one horizon on one test window. Positive values mean the model's top-decile
+     picks beat its bottom-decile picks; negative values mean it anti-ranked. The left panel is the
+     pre-2008 split (smaller and noisier); the right is post-2012 (the main result).</p>
+  {_div(decile, include_js=True)}
+  <p>LightGBM wins decisively on the medium and long horizons in the post-2012 split. On the 1-year
+     horizon, the demographics-only hedonic baseline (Ridge regression on ACS variables) actually edges
+     LightGBM — a useful sanity check that fancy methods aren't always required.</p>
+
+  <h2>2 · What did the model learn? — SHAP feature importance</h2>
+  <p>For each horizon, we compute mean absolute SHAP value per feature on the training sample. SHAP
+     decomposes each prediction into per-feature contributions (positive = pushed the prediction up,
+     negative = down). The bars below show the 15 features that the LightGBM model used most heavily.</p>
+  <h3>Short horizon (1 year)</h3>
   {_div(shap_figs[0], include_js=False)}
+  <h3>Medium horizon (3 years)</h3>
   {_div(shap_figs[1], include_js=False)}
+  <h3>Long horizon (5 years)</h3>
   {_div(shap_figs[2], include_js=False)}
 
-  <h2>3 · Top-20 zip leaderboard (predicted fwd_3y annualized, as of latest data)</h2>
-  <p>Scored from the post_2012 LightGBM at the most recent year-month with ≥80% feature coverage
-     across the model's 41 features. Driver column shows top-3 SHAP contributions per zip.</p>
+  <p><b>Two findings worth flagging:</b></p>
+  <ul>
+    <li><b>Climate features punch above their weight.</b> FEMA disaster declarations (fire, hurricane,
+        severe storm, total count) and NRI wildfire / flood risk scores appear in the top 10 for every
+        horizon. The original study design hypothesized that climate was an underweighted bucket
+        compared to the textbook macro + demographic predictors — the data agrees.</li>
+    <li><b>Real rates separate medium / long horizons from short.</b> M2 money supply and lumber prices
+        dominate the 1-year picture; 10-year real rates (TIPS) take #1 for both 3-year and 5-year
+        horizons. This is exactly the kind of structural separation a horizon-comparative study is
+        meant to surface.</li>
+  </ul>
+
+  <h2>3 · Where might the model want to buy today?</h2>
+  <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the top-200
+     metros at the most recent month with enough feature coverage to make a confident prediction
+     (December 2023, ≈13,000 zips). The table below lists the top 20. The driver column shows the
+     three features that contributed most to that zip's predicted return — these are per-zip SHAP
+     contributions, not the global feature ranking above.</p>
   {leaderboard_html}
 
-  <p class='footnote'>arbok · model-first, personal-overlay second · all data free /
-     public sources. Code at <code>src/arbok/</code>.</p>
+  <div class='caveat'>
+    <b>Important caveats on the leaderboard:</b>
+    <ul style='margin-top: .4em; margin-bottom: 0;'>
+      <li>Predictions are compressed to a narrow +2.7% to +3.8% band. Most of the model's signal is
+          time-driven (real rates, M2) which is uniform across zips at any single point in time.
+          Spatial discrimination is currently weak.</li>
+      <li>The negative SHAP contribution from <code>fred.real_rate_10y</code> appears for every zip —
+          it's not a zip-specific signal, it's just "rates are high right now." Useful temporal context,
+          not actionable for picking.</li>
+      <li>This is a model output, not investment advice. The model is unaware of zoning, school
+          districts, walkability, specific listings, or your personal constraints. It has a positive
+          backtest signal, not a guarantee.</li>
+    </ul>
+  </div>
+
+  <h2>Caveats and what's not in this run</h2>
+  <ul>
+    <li><b>Four data sources still pending.</b> HMDA mortgage records, FCC broadband, NOAA satellite
+        nightlights, and Foursquare points-of-interest are coded but need manual downloads or paid
+        credentials. Adding them is the next concrete expansion.</li>
+    <li><b>Single experiment per split.</b> Walk-forward CV with rolling refit would give honest
+        confidence bands.</li>
+    <li><b>No spatial cross-validation.</b> Holding out whole metros (not just months) would catch
+        any leakage from neighboring zips inside the same CBSA being on both sides.</li>
+    <li><b>Returns are price-only.</b> Imputed rent yield (using Zillow ZORI) is on the roadmap for
+        a "total-return" target.</li>
+    <li><b>ACS age-bin codes drift pre-2017</b> (the <code>age_28_38_share</code> feature shows 0%
+        for older vintages); known bug, fixable.</li>
+    <li><b>Realtor inventory only goes back to 2016-07.</b> Pre-2016 observations have no inventory
+        features.</li>
+  </ul>
+
+  <h2>Glossary</h2>
+  <dl class='glossary'>
+    <dt>ZHVI</dt><dd>Zillow Home Value Index — a smoothed monthly home-value estimate per zip code.
+        The price series we predict.</dd>
+    <dt>ZORI</dt><dd>Zillow Observed Rent Index — companion rent index per zip; not yet used in the target.</dd>
+    <dt>CBSA</dt><dd>Core-Based Statistical Area — what Census calls a "metro area." 200 of these cover ~80%
+        of US population.</dd>
+    <dt>ZCTA</dt><dd>Zip Code Tabulation Area — Census's approximation of a USPS zip; ≈ but ≠ identical
+        to a zip.</dd>
+    <dt>fwd_1y / fwd_3y / fwd_5y</dt><dd>The forward home-price return at that zip over the next 1 / 3 / 5
+        years, annualized for the latter two. These are what we predict.</dd>
+    <dt>Decile spread</dt><dd>Mean realized return of the top-predicted 10% of zips minus the bottom 10%.
+        The bottom-line "would this model have helped me pick?" number.</dd>
+    <dt>Spearman ρ</dt><dd>Rank correlation between predicted and realized returns. Robust to outliers
+        and to wrong-magnitude predictions; only cares about ordering.</dd>
+    <dt>SHAP</dt><dd>Shapley Additive Explanations — a per-prediction decomposition into feature
+        contributions, summable to the model's output. Lets you say "this zip was ranked high
+        <i>because of</i> features X, Y, Z."</dd>
+    <dt>FEMA NRI</dt><dd>FEMA's National Risk Index — public free dataset of natural-hazard risk scores
+        at census-tract level. Used here as the climate-exposure proxy in place of paid First Street.</dd>
+  </dl>
+
+  <p class='footnote'>arbok · designed model-first, personal-overlay second · all data free /
+     public sources · code at <code>src/arbok/</code> · contact author for source / methodology questions.</p>
 </body>
 </html>
 """

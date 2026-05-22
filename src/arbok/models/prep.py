@@ -110,6 +110,38 @@ def build_xy(
     return X_train, y_train, X_test, y_test, feats
 
 
+def demean_by_cbsa_month(
+    fs: pd.DataFrame,
+    cols: list[str],
+    group_keys: tuple[str, ...] = ("cbsa", "year_month"),
+) -> pd.DataFrame:
+    """Subtract per-(cbsa, year_month) mean from each col. Returns a new DataFrame.
+
+    Why: features broadcast from national/county/CBSA level (FRED rates, county wages,
+    CBSA permits) have the SAME value for every zip in the group, so they zero out and
+    will be dropped downstream by the near-zero-variance filter. What's left is the
+    zip-specific deviation — what makes this zip different from its metro neighbors.
+    Forces the model to learn spatial discrimination instead of time effects.
+    """
+    out = fs.copy()
+    group = fs.groupby(list(group_keys), observed=True)
+    for c in cols:
+        if c in out.columns and pd.api.types.is_numeric_dtype(out[c]):
+            out[c] = fs[c] - group[c].transform("mean")
+    return out
+
+
+def spatial_demean_features(
+    fs: pd.DataFrame, target_cols: list[str] | None = None
+) -> pd.DataFrame:
+    """Wrapper: demean both modeling features AND the listed targets, by (cbsa, year_month)."""
+    feats = feature_columns(fs, min_coverage=0.0)  # keep all numerics; near-zero-var dropped later
+    cols = list(feats)
+    if target_cols:
+        cols += [c for c in target_cols if c in fs.columns]
+    return demean_by_cbsa_month(fs, cols)
+
+
 def spatial_cv_folds(
     cbsa_series: pd.Series, n_folds: int = 5, seed: int = 0
 ) -> list[tuple[np.ndarray, np.ndarray]]:
