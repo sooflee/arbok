@@ -116,41 +116,56 @@ def _download_zip(url: str, dest: Path) -> Path:
     return dest
 
 
+def _read_csv_columns(fh) -> tuple[str, str]:
+    """Sniff which zip + award-key column names this CSV uses.
+
+    Contract CSVs:  recipient_zip_4_code  + contract_award_unique_key
+    Assistance:     recipient_zip_code    + assistance_award_unique_key
+    """
+    header = pd.read_csv(fh, nrows=0).columns.tolist()
+    fh.seek(0)
+    zip_col = "recipient_zip_4_code" if "recipient_zip_4_code" in header else "recipient_zip_code"
+    key_col = (
+        "contract_award_unique_key" if "contract_award_unique_key" in header
+        else "assistance_award_unique_key"
+    )
+    return zip_col, key_col
+
+
 def _aggregate_csv_in_zip(zip_path: Path, fiscal_year: int) -> pd.DataFrame:
     """Stream every CSV in the archive, aggregating obligations by recipient zip5."""
-    totals: dict[str, float] = {}
-    counts: dict[str, int] = {}
+    obl_totals: dict[str, float] = {}
+    award_sets: dict[str, set] = {}
     with zipfile.ZipFile(zip_path) as zf:
-        members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        for name in members:
+        for name in (n for n in zf.namelist() if n.lower().endswith(".csv")):
             print(f"[usaspending]   aggregating {name}")
+            with zf.open(name) as sniff_fh:
+                zip_col, key_col = _read_csv_columns(sniff_fh)
             with zf.open(name) as fh:
                 reader = pd.read_csv(
                     fh,
-                    usecols=["recipient_zip_4_code", "federal_action_obligation",
-                             "contract_award_unique_key", "assistance_award_unique_key"]
-                    if "Assistance" in name else
-                    ["recipient_zip_4_code", "federal_action_obligation", "contract_award_unique_key"],
-                    dtype={"recipient_zip_4_code": "string"},
+                    usecols=[zip_col, "federal_action_obligation", key_col],
+                    dtype={zip_col: "string", key_col: "string"},
                     chunksize=CHUNK_ROWS,
                     low_memory=False,
                 )
                 for chunk in reader:
                     zip5 = (
-                        chunk["recipient_zip_4_code"].astype("string").str.replace("-", "", regex=False)
+                        chunk[zip_col].astype("string").str.replace("-", "", regex=False)
                         .str.extract(r"^(\d{5})", expand=False)
                     )
                     obl = pd.to_numeric(chunk["federal_action_obligation"], errors="coerce").fillna(0.0)
-                    key_col = "contract_award_unique_key" if "contract_award_unique_key" in chunk.columns else "assistance_award_unique_key"
                     sub = pd.DataFrame({"zip": zip5, "obl": obl, "k": chunk[key_col]}).dropna(subset=["zip"])
-                    for z, grp in sub.groupby("zip", sort=False):
-                        totals[z] = totals.get(z, 0.0) + float(grp["obl"].sum())
-                        counts[z] = counts.get(z, 0) + int(grp["k"].nunique())
+                    grouped = sub.groupby("zip", sort=False)
+                    for z, grp in grouped:
+                        obl_totals[z] = obl_totals.get(z, 0.0) + float(grp["obl"].sum())
+                        award_sets.setdefault(z, set()).update(grp["k"].dropna().tolist())
+    zips = list(obl_totals.keys())
     out = pd.DataFrame({
-        "zip": list(totals.keys()),
+        "zip": zips,
         "fiscal_year": fiscal_year,
-        "total_obligations_usd": list(totals.values()),
-        "n_awards": [counts[z] for z in totals.keys()],
+        "total_obligations_usd": [obl_totals[z] for z in zips],
+        "n_awards": [len(award_sets[z]) for z in zips],
     })
     out["n_awards"] = out["n_awards"].astype("Int64")
     return out.sort_values("total_obligations_usd", ascending=False).reset_index(drop=True)

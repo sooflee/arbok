@@ -26,6 +26,7 @@ from arbok.labels import label as feat_label
 ARTIFACTS = PROCESSED / "phase2_artifacts"
 RESULTS = pd.read_parquet(PROCESSED / "phase2_results.parquet")
 LEADERBOARD = pd.read_parquet(PROCESSED / "zip_leaderboard.parquet")
+CITY_LEADERBOARD = pd.read_parquet(PROCESSED / "city_leaderboard.parquet") if (PROCESSED / "city_leaderboard.parquet").exists() else None
 FS = pd.read_parquet(PROCESSED / "feature_store_zip_month.parquet")
 ZIP_GEO = pd.read_parquet(PROCESSED / "zip_geo.parquet") if (PROCESSED / "zip_geo.parquet").exists() else None
 
@@ -123,6 +124,32 @@ def _humanize_drivers(s: str) -> str:
     return ", ".join(out_parts)
 
 
+def chart_city_leaderboard_top_n(n: int = 20) -> str:
+    """One row per city, sorted by best-zip predicted return."""
+    if CITY_LEADERBOARD is None:
+        return "<p><i>City leaderboard not built — run scripts/score_zips.py.</i></p>"
+    df = CITY_LEADERBOARD.head(n).copy()
+    df["location"] = df["city"].astype(str) + ", " + df["state"].astype(str)
+    df["best_zhvi"] = df["zhvi"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—")
+    df["pred_best"] = df["predicted_fwd_3y_annualized"].apply(lambda x: f"{x*100:+.2f}%")
+    df["pred_top5"] = df["mean_pred_top5"].apply(lambda x: f"{x*100:+.2f}%" if pd.notna(x) else "—")
+    df["strong"] = df["strong_zip_count"].astype(str)
+    df["drivers_html"] = df["drivers"].apply(_humanize_drivers)
+    df = df[["location", "best_zip", "best_zhvi", "pred_best", "pred_top5", "strong", "drivers_html"]]
+    df.columns = ["City, State", "Best ZIP", "Best ZIP price", "Pred for best ZIP", "Mean pred (top 5 zips)", "Zips in top 10%", "Top SHAP drivers for best ZIP (hover)"]
+    rows = []
+    for row in df.values:
+        cells = []
+        for col_idx, v in enumerate(row):
+            if col_idx == len(row) - 1:
+                cells.append(f"<td>{v}</td>")
+            else:
+                cells.append(f"<td>{escape(str(v))}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    head = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in df.columns) + "</tr>"
+    return f"<table class='leaderboard'>{head}{''.join(rows)}</table>"
+
+
 def chart_leaderboard_top_n(n: int = 20) -> str:
     """Return an HTML <table> string with top-n zips, including city/state lookup + human drivers."""
     df = LEADERBOARD.head(n).copy()
@@ -188,7 +215,8 @@ def main() -> None:
     print("Building charts…")
     decile = chart_decile_spread()
     shap_figs = [chart_shap_for(h) for h in HORIZONS]
-    leaderboard_html = chart_leaderboard_top_n(20)
+    leaderboard_html = chart_city_leaderboard_top_n(20)
+    zip_leaderboard_html = chart_leaderboard_top_n(20)
     headline_html = chart_headline_table()
 
     html = f"""<!DOCTYPE html>
@@ -387,10 +415,15 @@ def main() -> None:
   <h2>3 · Where might the model want to buy today?</h2>
   <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
      <b>top-100</b> US metros at the most recent month with enough feature coverage to make a confident
-     prediction. The table below lists the top 20 picks. The driver column shows the three features
-     that contributed most to that zip's predicted return — these are per-zip SHAP contributions, not
-     the global feature ranking above. <b>Hover over any feature</b> to see its description.</p>
+     prediction. The table below is rolled up to one row per city — each city shows its best-scoring
+     ZIP, the mean predicted return across its top-5 ZIPs, and a count of how many of its ZIPs land
+     in the top 10% of all predictions nationally. <b>Hover over any feature</b> to see its description.</p>
   {leaderboard_html}
+
+  <h3>3a · ZIP-level detail (top 20)</h3>
+  <p>The same model expanded back to per-ZIP rows for users who want to drill into specific neighborhoods
+     rather than cities.</p>
+  {zip_leaderboard_html}
 
   <div class='caveat'>
     <b>Important caveats on the leaderboard:</b>
