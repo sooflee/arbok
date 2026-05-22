@@ -46,11 +46,16 @@ def hedonic_predictor(
     fancy model doesn't beat this, the macro/amenity/climate features aren't earning
     their seat.
     """
-    from sklearn.linear_model import LinearRegression
+    from sklearn.linear_model import Ridge
 
     acs_cols = [c for c in X_train.columns if c.startswith("acs__")]
     if not acs_cols:
         return BaselineResult("hedonic_acs", np.full(len(X_test), float(y_train.mean())))
-    m = LinearRegression()
-    m.fit(X_train[acs_cols], y_train)
-    return BaselineResult("hedonic_acs", m.predict(X_test[acs_cols]))
+    # Ridge (not OLS) — ACS columns are highly collinear (pop_25_29 + pop_30_34 ...)
+    # so OLS coefficients explode. alpha=1 is conservative.
+    m = Ridge(alpha=1.0)
+    m.fit(X_train[acs_cols], y_train.values)
+    pred = m.predict(X_test[acs_cols])
+    # Clip to plausible-return range (matches training y range with small headroom).
+    lo, hi = y_train.quantile(0.001), y_train.quantile(0.999)
+    return BaselineResult("hedonic_acs", np.clip(pred, lo, hi))

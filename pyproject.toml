@@ -15,6 +15,7 @@ dependencies = [
     "openpyxl>=3.1",
     "tqdm>=4.66",
     "python-dotenv>=1.0",
+    "plotly>=6.7.0",
 ]
 
 [project.optional-dependencies]

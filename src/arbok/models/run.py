@@ -1,9 +1,13 @@
 """Phase 2 orchestrator: train baselines + ElasticNet + LightGBM per horizon, both splits."""
 from __future__ import annotations
 
+import pickle
+
 import pandas as pd
 
 from arbok.config import PROCESSED
+
+ARTIFACTS = PROCESSED / "phase2_artifacts"
 from arbok.models.baselines import hedonic_predictor, metro_mean_predictor, overall_mean_predictor
 from arbok.models.elastic import fit_elasticnet
 from arbok.models.eval import evaluate, results_table
@@ -81,4 +85,17 @@ def run_all(
         path = PROCESSED / "phase2_results.parquet"
         out.to_parquet(path, index=False)
         print(f"\nSaved results -> {path}")
+        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        for (horizon, split_name), arts in artifacts.items():
+            slug = f"{horizon}__{split_name}"
+            # Save LightGBM as text + features; ElasticNet as pickle.
+            if "lgbm" in arts:
+                arts["lgbm"].model.save_model(str(ARTIFACTS / f"{slug}__lgbm.txt"))
+                (ARTIFACTS / f"{slug}__lgbm.features.txt").write_text(
+                    "\n".join(arts["lgbm"].feature_names)
+                )
+            if "elastic" in arts:
+                with open(ARTIFACTS / f"{slug}__elastic.pkl", "wb") as f:
+                    pickle.dump(arts["elastic"], f)
+        print(f"Saved trained models -> {ARTIFACTS}/")
     return out, artifacts
