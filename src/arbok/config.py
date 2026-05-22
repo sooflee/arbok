@@ -12,7 +12,7 @@ PROCESSED = DATA / "processed"
 for _d in (RAW, INTERIM, PROCESSED):
     _d.mkdir(parents=True, exist_ok=True)
 
-TOP_N_METROS = 200
+TOP_N_METROS = 100
 
 HORIZONS_MONTHS: dict[str, int] = {
     "fwd_6m": 6,

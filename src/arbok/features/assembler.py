@@ -57,8 +57,17 @@ class SourceSpec:
 
 
 def _ns(df: pd.DataFrame, prefix: str, keys: tuple[str, ...] = ("zip", "year_month")) -> pd.DataFrame:
-    """Rename feature columns to `<prefix>__<col>`, leaving join keys untouched."""
-    return df.rename(columns={c: f"{prefix}__{c}" for c in df.columns if c not in keys})
+    """Rename feature columns to `<prefix>__<col>`, leaving join keys untouched.
+
+    Idempotent: columns already starting with ``<prefix>__`` are left alone,
+    so a loader that happens to pre-prefix its output doesn't end up double-
+    prefixed (e.g. ``derived__derived__drawdown``).
+    """
+    head = f"{prefix}__"
+    return df.rename(columns={
+        c: f"{head}{c}" for c in df.columns
+        if c not in keys and not c.startswith(head)
+    })
 
 
 def _shift_year_month(df: pd.DataFrame, lag_months: int, col: str = "year_month") -> pd.DataFrame:

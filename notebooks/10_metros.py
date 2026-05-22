@@ -11,14 +11,14 @@
 # # Phase 0a — Top 200 US metros by population
 #
 # Pulls CBSA-level population estimates from the Census PEP API (vintage 2023),
-# filters to metropolitan statistical areas (drops micros), keeps the top 200,
-# and saves to `data/processed/top200_metros.csv`.
+# filters to metropolitan statistical areas (drops micros), keeps the top 100,
+# and saves to `data/processed/top_metros.csv`.
 #
 # Requires `CENSUS_API_KEY` in env (or the manually-staged CSV fallback —
 # see docstring in `arbok.sources.census_metros`).
 
 # %%
-from arbok.sources.census_metros import build_and_save, load_top200, top_n_metros, fetch_cbsa_population
+from arbok.sources.census_metros import build_and_save, load_top_metros, top_n_metros, fetch_cbsa_population
 
 # %% [markdown]
 # ## Build (one-shot)
@@ -31,7 +31,7 @@ top.head(10)
 # ## Reload from disk
 
 # %%
-df = load_top200()
+df = load_top_metros()
 print(df.shape)
 df.head()
 
@@ -47,7 +47,7 @@ df.nlargest(5, "population")[["rank", "core_name", "state", "population"]]
 df["state"].value_counts().head(15)
 
 # %%
-# Smallest metro in the top-200 — defines the population threshold for inclusion
+# Smallest metro in the top-100 — defines the population threshold for inclusion
 df.tail(3)[["rank", "core_name", "state", "population"]]
 
 # %% [markdown]

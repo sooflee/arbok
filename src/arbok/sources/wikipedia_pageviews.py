@@ -2,14 +2,14 @@
 
 Pulls per-article monthly pageviews from the Wikimedia Pageviews REST API
 (free, no auth, but requires a non-empty User-Agent). For each CBSA in the
-top-200 list, we resolve a Wikipedia article slug (e.g. "Austin,_Texas") and
+top-100 list, we resolve a Wikipedia article slug (e.g. "Austin,_Texas") and
 ask the API for monthly totals across the project history.
 
 Verified endpoint shape (2026-05-21): GET ``.../per-article/en.wikipedia/
 all-access/all-agents/<ARTICLE>/monthly/<YYYYMMDD>/<YYYYMMDD>`` returns
 ``{"items": [{"article", "timestamp" (YYYYMMDDHH), "views", ...}, ...]}``.
 
-Expected runtime for the full top-200: ~25-30s (200 calls x ~0.1s sleep
+Expected runtime for the full top-100: ~25-30s (200 calls x ~0.1s sleep
 plus latency). Smoke test (5 metros) runs in ~2s.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ import pandas as pd
 import requests
 
 from arbok.config import PROCESSED
-from arbok.sources.census_metros import load_top200
+from arbok.sources.census_metros import load_top_metros
 
 WIKIPEDIA_URL = (
     "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
@@ -35,7 +35,7 @@ SLEEP_SECONDS = 0.1
 OUT_PATH = PROCESSED / "wikipedia_pageviews_cbsa_month.parquet"
 
 # Two-letter state -> full name, for assembling article slugs like
-# "Austin,_Texas". Covers the 50 states + DC (PR not in top-200 metros).
+# "Austin,_Texas". Covers the 50 states + DC (PR not in top-100 metros).
 _STATE_NAMES: dict[str, str] = {
     "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
     "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
@@ -110,15 +110,15 @@ def fetch_article_pageviews(
     return df[["year_month", "views", "article"]]
 
 
-def fetch_for_metros(top200_df: pd.DataFrame) -> pd.DataFrame:
-    """Loop the top-200 list, fetch each article's monthly pageviews, concat.
+def fetch_for_metros(top_metros_df: pd.DataFrame) -> pd.DataFrame:
+    """Loop the top-100 list, fetch each article's monthly pageviews, concat.
 
     Adds the source ``cbsa`` so the frame can be joined back into the panel.
     Articles with no Wikipedia page (404) are skipped silently — the caller
     can detect them via missing CBSAs in the output.
     """
     frames: list[pd.DataFrame] = []
-    for row in top200_df.itertuples(index=False):
+    for row in top_metros_df.itertuples(index=False):
         metro_name = f"{row.core_name}, {row.state}"
         article = metro_to_article(metro_name)
         try:
@@ -139,11 +139,11 @@ def fetch_for_metros(top200_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_and_save() -> Path:
-    """Fetch pageviews for every top-200 metro and persist to parquet.
+    """Fetch pageviews for every top-100 metro and persist to parquet.
 
     Expected runtime ~25-30s for 200 metros (1 request each + 0.1s sleep).
     """
-    top = load_top200()
+    top = load_top_metros()
     panel = fetch_for_metros(top)
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     panel.to_parquet(OUT_PATH)
@@ -161,7 +161,7 @@ def load_pageviews() -> pd.DataFrame:
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke test
     # Smoke test: pull 5 known metros and print head/tail.
-    top = load_top200()
+    top = load_top_metros()
     smoke_cbsas = {
         "35620": "New York",
         "31080": "Los Angeles",

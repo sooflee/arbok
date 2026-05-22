@@ -1,4 +1,4 @@
-"""Zip-month panel assembly: join ZHVI + ZORI + HUD crosswalk, filter to top-200 metros."""
+"""Zip-month panel assembly: join ZHVI + ZORI + HUD crosswalk, filter to top-100 metros."""
 from __future__ import annotations
 
 import logging
@@ -17,9 +17,9 @@ def build_panel(
     zhvi: pd.DataFrame,
     zori: pd.DataFrame,
     crosswalk: pd.DataFrame,
-    top200: pd.DataFrame,
+    top_metros: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Build the zip-month panel filtered to zips inside top-200 CBSAs.
+    """Build the zip-month panel filtered to zips inside top-100 CBSAs.
 
     Parameters
     ----------
@@ -28,8 +28,8 @@ def build_panel(
         ``zip``, ``year_month`` (Period[M]), ``value``.
     crosswalk
         HUD ZIP-CBSA crosswalk (one or many rows per zip).
-    top200
-        Output of :func:`arbok.sources.census_metros.load_top200`; must have
+    top_metros
+        Output of :func:`arbok.sources.census_metros.load_top_metros`; must have
         a ``cbsa`` column.
 
     Returns
@@ -38,7 +38,7 @@ def build_panel(
     Also saved to :data:`PANEL_PARQUET`.
     """
     zip_to_cbsa = dominant_cbsa_per_zip(crosswalk)
-    top_cbsa = set(top200["cbsa"].astype(str).str.zfill(5))
+    top_cbsa = set(top_metros["cbsa"].astype(str).str.zfill(5))
     zip_to_cbsa = zip_to_cbsa[zip_to_cbsa["cbsa"].isin(top_cbsa)]
     logger.info(
         "Crosswalk -> %d zips inside top-%d metros", len(zip_to_cbsa), len(top_cbsa)

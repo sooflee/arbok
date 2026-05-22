@@ -21,6 +21,7 @@ NON_FEATURE_PREFIXES = ("is_train_", "is_test_")
 NON_FEATURE_EXACT = {
     "zip", "cbsa", "year_month", "zhvi", "zori",
     "split", "fwd_6m", "fwd_1y", "fwd_3y", "fwd_5y", "fwd_10y",
+    "fwd_1y_total", "fwd_3y_total", "fwd_5y_total",
 }
 
 # Categorical / textual / identifier cols we drop (could one-hot later if useful).

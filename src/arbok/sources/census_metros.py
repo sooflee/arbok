@@ -1,6 +1,6 @@
 """Top-N US metros (CBSAs) by population, from Census Population Estimates Program.
 
-Phase 0a. Produces `data/processed/top200_metros.csv` with columns:
+Phase 0a. Produces `data/processed/top_metros.csv` with columns:
     rank, cbsa, name, state, population, vintage
 
 The Census PEP API path is `https://api.census.gov/data/{vintage}/pep/population`
@@ -22,7 +22,7 @@ import requests
 from arbok.config import PROCESSED, RAW, TOP_N_METROS
 
 API_URL = "https://api.census.gov/data/{vintage}/pep/population"
-OUTPUT_CSV = PROCESSED / "top200_metros.csv"
+OUTPUT_CSV = PROCESSED / "top_metros.csv"
 METRO_SUFFIX = "Metro Area"  # CBSA NAME suffix for metropolitan statistical areas
 
 
@@ -126,8 +126,8 @@ def build_and_save(vintage: int = 2023, n: int = TOP_N_METROS) -> pd.DataFrame:
     return top
 
 
-def load_top200() -> pd.DataFrame:
-    """Read the saved top-200 CSV."""
+def load_top_metros() -> pd.DataFrame:
+    """Read the saved top-metros CSV."""
     if not OUTPUT_CSV.exists():
         raise FileNotFoundError(f"{OUTPUT_CSV} not found. Run build_and_save() first.")
     return pd.read_csv(OUTPUT_CSV, dtype={"cbsa": str})

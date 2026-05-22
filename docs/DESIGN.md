@@ -8,7 +8,7 @@ Identify the best predictors of US residential real-estate returns at zip-code l
 Model first, personal overlay second.
 
 ## Scope (locked 2026-05-21)
-- **Geography:** top 200 US metros by population (CBSAs), zip-code level (~22K zips).
+- **Geography:** top 100 US metros by population (CBSAs), zip-code level (~22K zips).
 - **Horizons:** short (6mo, 1y), medium (3y), long (5y, 10y), studied comparatively.
 - **Data:** free / public sources only.
 - **Deliverable:** this repo + notebooks.
@@ -51,7 +51,7 @@ Both reported for every model.
 
 | Phase | Deliverable                                                   |
 |-------|---------------------------------------------------------------|
-| 0     | Top-200 metros, Zillow ZHVI/ZORI panel, forward returns       |
+| 0     | Top-100 metros, Zillow ZHVI/ZORI panel, forward returns       |
 | 1     | Ingest 15 starter-pack predictors                             |
 | 2     | Baselines + three horizon models on starter pack; spatial CV  |
 | 3     | Expand to full ~50-predictor catalog; SHAP comparison         |

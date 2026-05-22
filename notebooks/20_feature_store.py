@@ -24,7 +24,7 @@ from arbok.features.assembler import (
 )
 from arbok.features.crosswalks import load_zip_county, load_zip_tract
 from arbok.panel import build_panel
-from arbok.sources.census_metros import load_top200
+from arbok.sources.census_metros import load_top_metros
 from arbok.sources.hud_crosswalk import dominant_cbsa_per_zip, load_zip_cbsa_crosswalk
 from arbok.sources.zillow import fetch_zhvi, fetch_zori
 from arbok.targets import add_split_label, compute_forward_returns
@@ -33,7 +33,7 @@ from arbok.targets import add_split_label, compute_forward_returns
 # ## 1. Inputs
 
 # %%
-top200 = load_top200()
+top_metros = load_top_metros()
 zhvi = fetch_zhvi()
 zori = fetch_zori()
 
@@ -42,13 +42,13 @@ XWALK_QUARTER = 4
 zip_cbsa = load_zip_cbsa_crosswalk(XWALK_YEAR, XWALK_QUARTER)
 zip_tract = load_zip_tract(XWALK_YEAR, XWALK_QUARTER)
 zip_county = load_zip_county(XWALK_YEAR, XWALK_QUARTER)
-print(f"top200: {top200.shape}, ZHVI: {zhvi.shape}, ZORI: {zori.shape}")
+print(f"top_metros: {top_metros.shape}, ZHVI: {zhvi.shape}, ZORI: {zori.shape}")
 
 # %% [markdown]
 # ## 2. Panel + targets
 
 # %%
-panel = build_panel(zhvi, zori, dominant_cbsa_per_zip(zip_cbsa), top200)
+panel = build_panel(zhvi, zori, dominant_cbsa_per_zip(zip_cbsa), top_metros)
 targets = compute_forward_returns(panel)
 targets = add_split_label(targets)
 print(f"panel: {panel.shape}, targets: {targets.shape}")

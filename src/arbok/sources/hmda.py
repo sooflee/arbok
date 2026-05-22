@@ -245,6 +245,187 @@ def build_aggregations_and_save(
                 print(f"[hmda] {y} {st}: HTTP error {e}")
             time.sleep(0.25)
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    target = PROCESSED / "hmda_state_year.parquet"
+    out.to_parquet(target, index=False)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tract-level build (the one the assembler actually wants)
+# ---------------------------------------------------------------------------
+# Minimal LAR columns needed to compute tract-year aggregates. Keeping the
+# column set small (a) cuts CSV parse time roughly 5x and (b) keeps the
+# per-state response small enough to hold in RAM without streaming-parse.
+_LAR_USECOLS = [
+    "activity_year",
+    "lei",
+    "state_code",
+    "census_tract",
+    "action_taken",
+    "loan_purpose",
+    "occupancy_type",
+    "loan_amount",
+]
+
+
+def _fetch_lar_purchases(year: int, state: str) -> pd.DataFrame:
+    """Download HMDA LAR for one state-year filtered to originated home-purchase
+    loans, parsing only the columns we aggregate. Cached on disk as gzip CSV
+    so re-runs are free.
+
+    Filters at the API: actions_taken=1 (originated), loan_purposes=1 (home
+    purchase). This shrinks the CA-2022 payload from ~250 MB to ~30 MB.
+    """
+    cache = HMDA_RAW / f"lar_{year}_{state}_p1.csv.gz"
+    if not cache.exists():
+        url = f"{DATA_BROWSER_BASE}/csv"
+        params = {
+            "years": year,
+            "states": state,
+            "actions_taken": 1,
+            "loan_purposes": 1,
+        }
+        with requests.get(url, params=params, stream=True, timeout=1800) as r:
+            r.raise_for_status()
+            # Stream to a temp file then gzip on read; CFPB CSV endpoint isn't
+            # gzipped on the wire, but we keep a gzip on disk for cache size.
+            import gzip as _gz
+
+            tmp = cache.with_suffix(".csv.gz.tmp")
+            with _gz.open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+            tmp.rename(cache)
+    return pd.read_csv(
+        cache,
+        compression="gzip",
+        usecols=lambda c: c in _LAR_USECOLS,
+        dtype={
+            "census_tract": "string",
+            "lei": "string",
+            "state_code": "string",
+        },
+        low_memory=False,
+    )
+
+
+def _aggregate_tract_year(lar: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate one state-year LAR to (tract, year) rows.
+
+    Emits per-tract: count_originated, sum_loan_amount, mean_loan_amount,
+    investor_share (occupancy_type != 1, i.e. second-home/investment),
+    institutional_share (occupancy_type != 1 AND lender filed >=
+    INSTITUTIONAL_LENDER_LOAN_COUNT_THRESHOLD nationally — proxy for
+    institutional/SFR-operator buyers since LEI lookup is empty).
+
+    The `tract` column is the 11-digit FIPS GEOID (zero-padded) so the
+    feature-store assembler can call aggregate_tract_to_zip on it.
+    """
+    if lar.empty:
+        return pd.DataFrame(
+            columns=[
+                "tract", "year", "count_originated", "sum_loan_amount",
+                "mean_loan_amount", "investor_share", "institutional_share",
+            ]
+        )
+    df = lar.copy()
+    df["census_tract"] = df["census_tract"].astype("string").str.strip()
+    # CFPB ships census_tract as the full 11-digit GEOID (e.g. "06037206040")
+    # but the field is occasionally blank when geocoding failed. Drop those.
+    df = df[df["census_tract"].str.fullmatch(r"\d{11}").fillna(False)]
+    df["loan_amount"] = pd.to_numeric(df["loan_amount"], errors="coerce")
+    df["occupancy_type"] = pd.to_numeric(df["occupancy_type"], errors="coerce")
+
+    # Identify high-volume lenders within this LAR slice. `set(...)` on the
+    # pandas Index ensures the resulting union with KNOWN_INSTITUTIONAL_LEIS
+    # is a true set; without it, pandas treats the Index as dict-like and the
+    # `|` operator raises TypeError.
+    lender_counts = df.groupby("lei").size()
+    high_volume_leis = set(
+        lender_counts[lender_counts >= INSTITUTIONAL_LENDER_LOAN_COUNT_THRESHOLD].index.tolist()
+    )
+    institutional_leis = high_volume_leis | set(KNOWN_INSTITUTIONAL_LEIS)
+
+    df["_is_nonprimary"] = (df["occupancy_type"] != 1).astype("int8")
+    df["_is_institutional"] = (
+        (df["occupancy_type"] != 1) & (df["lei"].isin(institutional_leis))
+    ).astype("int8")
+
+    grouped = df.groupby("census_tract").agg(
+        count_originated=("loan_amount", "size"),
+        sum_loan_amount=("loan_amount", "sum"),
+        nonprimary_count=("_is_nonprimary", "sum"),
+        institutional_count=("_is_institutional", "sum"),
+    ).reset_index().rename(columns={"census_tract": "tract"})
+    grouped["mean_loan_amount"] = grouped["sum_loan_amount"] / grouped["count_originated"]
+    grouped["investor_share"] = grouped["nonprimary_count"] / grouped["count_originated"]
+    grouped["institutional_share"] = (
+        grouped["institutional_count"] / grouped["count_originated"]
+    )
+    grouped["year"] = int(lar["activity_year"].iloc[0]) if "activity_year" in lar.columns else None
+    return grouped[
+        [
+            "tract", "year",
+            "count_originated", "sum_loan_amount", "mean_loan_amount",
+            "investor_share", "institutional_share",
+        ]
+    ]
+
+
+def build_tract_year_and_save(
+    years: list[int], states: list[str] | None = None, sleep_s: float = 0.25
+) -> pd.DataFrame:
+    """Build the per-tract-year HMDA panel and save to
+    `data/processed/hmda_tract_year.parquet`.
+
+    Schema: tract (11-digit FIPS str), year (int), count_originated,
+    sum_loan_amount, mean_loan_amount, investor_share, institutional_share.
+
+    The assembler's `_adapter_hmda` reads this file and the tract-level
+    crosswalk (`aggregate_tract_to_zip`) rolls it up to ZIP.
+
+    Filters at the API to originated home-purchase loans only; download per
+    state-year is ~1-50 MB after filtering (CA is the largest). Failed
+    state-years are logged and skipped, not raised.
+    """
+    states = states or _US_STATES
+    frames: list[pd.DataFrame] = []
+    for y in years:
+        for st in states:
+            try:
+                lar = _fetch_lar_purchases(year=y, state=st)
+                agg = _aggregate_tract_year(lar)
+                if not agg.empty:
+                    frames.append(agg)
+                    print(f"[hmda] {y} {st}: {len(lar):>7} loans -> {len(agg):>5} tracts")
+            except requests.HTTPError as e:
+                print(f"[hmda] {y} {st}: HTTP error {e}")
+            except Exception as e:  # pragma: no cover - keep build resilient
+                print(f"[hmda] {y} {st}: {type(e).__name__}: {e}")
+            time.sleep(sleep_s)
+    out = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else pd.DataFrame(
+            columns=[
+                "tract", "year", "count_originated", "sum_loan_amount",
+                "mean_loan_amount", "investor_share", "institutional_share",
+            ]
+        )
+    )
+    # Same (tract, year) can appear once per state shard at most, but be safe.
+    if not out.empty:
+        out = (
+            out.groupby(["tract", "year"], as_index=False)
+            .agg(
+                count_originated=("count_originated", "sum"),
+                sum_loan_amount=("sum_loan_amount", "sum"),
+                investor_share=("investor_share", "mean"),
+                institutional_share=("institutional_share", "mean"),
+            )
+        )
+        out["mean_loan_amount"] = out["sum_loan_amount"] / out["count_originated"]
     target = PROCESSED / "hmda_tract_year.parquet"
     out.to_parquet(target, index=False)
     return out

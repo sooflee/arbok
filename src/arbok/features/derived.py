@@ -5,11 +5,14 @@ zip-native predictors we can produce without external data. They're especially
 valuable for the spatial-demeaned model since the macro/CBSA features get
 zeroed out.
 
-- ``derived__yield_gross``: 12 * ZORI / ZHVI. Annualized gross rental yield.
+Column names are emitted WITHOUT the ``derived__`` prefix; the assembler's
+``SourceSpec(namespace="derived", ...)`` prepends it once.
+
+- ``yield_gross``: 12 * ZORI / ZHVI. Annualized gross rental yield.
   A cap-rate proxy investors care about; tends to be higher in lower-priced metros.
-- ``derived__vol_24m``: rolling 24-month standard deviation of monthly ZHVI return.
+- ``vol_24m``: rolling 24-month standard deviation of monthly ZHVI return.
   Volatility = downside risk proxy.
-- ``derived__drawdown``: current ZHVI / trailing-60mo max ZHVI - 1.
+- ``drawdown``: current ZHVI / trailing-60mo max ZHVI - 1.
   Negative when zip is below its trailing peak; near-zero at all-time highs.
 """
 from __future__ import annotations
@@ -26,10 +29,10 @@ def compute_derived(panel: pd.DataFrame) -> pd.DataFrame:
     if str(df["year_month"].dtype).startswith("period"):
         df["year_month"] = df["year_month"].dt.to_timestamp()
 
-    df["derived__yield_gross"] = 12.0 * df["zori"] / df["zhvi"]
+    df["yield_gross"] = 12.0 * df["zori"] / df["zhvi"]
 
     df["_mret"] = df.groupby("zip", observed=True)["zhvi"].pct_change()
-    df["derived__vol_24m"] = (
+    df["vol_24m"] = (
         df.groupby("zip", observed=True)["_mret"]
         .transform(lambda s: s.rolling(24, min_periods=12).std())
     )
@@ -38,9 +41,9 @@ def compute_derived(panel: pd.DataFrame) -> pd.DataFrame:
         df.groupby("zip", observed=True)["zhvi"]
         .transform(lambda s: s.rolling(60, min_periods=12).max())
     )
-    df["derived__drawdown"] = df["zhvi"] / df["_rmax"] - 1.0
+    df["drawdown"] = df["zhvi"] / df["_rmax"] - 1.0
 
-    return df[["zip", "year_month", "derived__yield_gross", "derived__vol_24m", "derived__drawdown"]]
+    return df[["zip", "year_month", "yield_gross", "vol_24m", "drawdown"]]
 
 
 def build_and_save() -> pd.DataFrame:

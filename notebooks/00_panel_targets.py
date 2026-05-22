@@ -14,7 +14,7 @@
 #
 # 1. Fetch Zillow ZHVI (SFR, smoothed SA) + ZORI (all homes + multifamily, smoothed SA) at zip.
 # 2. Load HUD-USPS ZIP-CBSA crosswalk (manual download required — see docstring).
-# 3. Load the top-200 metros table produced by `notebooks/10_metros.py`.
+# 3. Load the top-100 metros table produced by `notebooks/10_metros.py`.
 # 4. Build the zip-month panel filtered to those metros.
 # 5. Compute 6mo / 1y / 3y / 5y / 10y forward ZHVI returns and split labels.
 # 6. Sanity check: per-metro means over time.
@@ -28,7 +28,7 @@ import pandas as pd
 
 from arbok.config import HORIZONS_MONTHS, SPLITS
 from arbok.panel import build_panel
-from arbok.sources.census_metros import load_top200
+from arbok.sources.census_metros import load_top_metros
 from arbok.sources.hud_crosswalk import (
     load_zip_cbsa_crosswalk,
     load_zip_cbsa_crosswalk_static,
@@ -73,15 +73,15 @@ crosswalk.head()
 # ## 3. Top-200 metros (produced by `notebooks/10_metros.py`)
 
 # %%
-top200 = load_top200()
-print(f"top200: {len(top200):,} metros")
-top200.head()
+top_metros = load_top_metros()
+print(f"top_metros: {len(top_metros):,} metros")
+top_metros.head()
 
 # %% [markdown]
 # ## 4. Build the panel
 
 # %%
-panel = build_panel(zhvi=zhvi, zori=zori, crosswalk=crosswalk, top200=top200)
+panel = build_panel(zhvi=zhvi, zori=zori, crosswalk=crosswalk, top_metros=top_metros)
 print(
     f"Panel: {len(panel):,} rows, {panel['zip'].nunique():,} zips, "
     f"{panel['cbsa'].nunique():,} CBSAs, "
@@ -139,7 +139,7 @@ zhvi_by_year = (
 zhvi_by_year.tail(15)
 
 # %% [markdown]
-# ### Quick plot — median ZHVI over time across all top-200 metros
+# ### Quick plot — median ZHVI over time across all top-100 metros
 
 # %%
 try:
@@ -153,7 +153,7 @@ if plt is not None:
     fig, ax = plt.subplots(figsize=(10, 4))
     ts.index = ts.index.to_timestamp()
     ax.plot(ts.index, ts.values)
-    ax.set_title("Median ZHVI across top-200-metro zips")
+    ax.set_title("Median ZHVI across top-100-metro zips")
     ax.set_ylabel("USD")
     ax.grid(alpha=0.3)
     fig.tight_layout()
