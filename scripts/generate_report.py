@@ -1,11 +1,14 @@
-"""Render a self-contained HTML report from Phase 2 results + leaderboard.
+"""Render two self-contained HTML pages from Phase 2 results + leaderboard.
 
-Sections:
-  1. Headline metrics (decile spread per horizon x split x model)
-  2. Per-horizon SHAP top-15 feature importance (post_2012 split — the strong one)
-  3. Top-50 zip leaderboard with per-zip drivers
+Outputs:
+  * data/processed/index.html   — landing page (decision aid: where to buy, overlays,
+                                  macro context, alt ranking, headline results).
+  * data/processed/methods.html — methodology + deep dive (CV robustness, backtest,
+                                  decile spread chart, SHAP, price stratification).
 
-Output: data/processed/report.html (open in any browser, no server needed).
+Both pages share the same <head> (favicon, OG, Twitter meta, inlined Plotly), CSS
+block, sticky TOC, accordions, sortable tables, and reading-time indicator. The
+landing page lives at the root of the GitHub Pages deploy.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -1298,23 +1301,1042 @@ def chart_shap_waterfall(horizon: str = "fwd_3y", split: str = "post_2012",
     return _build(top_row, "#1a9850"), _build(bot_row, "#a50026")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Shared HTML scaffolding (head, CSS, TOC, sortable-table JS, scroll-spy).
+# Both index.html and methods.html share this; only the body + title differ.
+# ---------------------------------------------------------------------------
+
+PAGE_TITLE_BASE = "arbok — what predicts US residential real-estate returns?"
+OG_DESCRIPTION = (
+    "A quant study of what predicts US residential real-estate returns: "
+    "3.73M-row zip-month panel, 140+ free public predictors across 11 "
+    "thematic classes, LightGBM + SHAP attribution, backtested 2018-2021."
+)[:200]
+
+
+def _html_head(page_title: str) -> str:
+    """Shared <head>: meta tags, OG/Twitter cards, favicon, inlined CSS block.
+
+    Plotly is inlined into the first chart of each page's body (see _div with
+    include_js=True), not into <head>, so this returns ONLY the static head
+    elements + the shared <style> block.
+    """
+    return f"""<!DOCTYPE html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>{escape(page_title)}</title>
+  <link rel='icon' href='assets/favicon.svg?v={BUILD_DATE}' type='image/svg+xml'>
+  <meta name='description' content="{escape(OG_DESCRIPTION)}">
+  <meta property='og:type' content='article'>
+  <meta property='og:title' content="{escape(page_title)}">
+  <meta property='og:description' content="{escape(OG_DESCRIPTION)}">
+  <meta property='og:image' content='assets/og-image.png?v={BUILD_DATE}'>
+  <meta property='og:url' content='{escape(SITE_URL)}'>
+  <meta name='twitter:card' content='summary_large_image'>
+  <meta name='twitter:title' content="{escape(page_title)}">
+  <meta name='twitter:description' content="{escape(OG_DESCRIPTION)}">
+  <meta name='twitter:image' content='assets/og-image.png?v={BUILD_DATE}'>
+  <style>
+    /* CSS Grid layout: sidebar TOC on the left, article on the right.
+       Below 1100px the TOC column collapses; the mobile <details> jump-menu
+       at the top of <article> picks up the slack. */
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+            margin: 0; color: #1a1a1a; line-height: 1.55; }}
+    .layout {{ display: grid;
+               grid-template-columns: 14em minmax(0, 1100px);
+               gap: 2em;
+               max-width: 1400px;
+               margin: 2em auto;
+               padding: 0 1em; }}
+    nav.toc {{ position: sticky; top: 2em; align-self: start;
+               font-size: .88em; max-height: calc(100vh - 4em);
+               overflow-y: auto; padding-right: .5em; }}
+    nav.toc h4 {{ margin: 0 0 .6em 0; color: #2c5282; font-size: .82em;
+                  text-transform: uppercase; letter-spacing: .05em; }}
+    nav.toc ul {{ list-style: none; padding: 0; margin: 0; }}
+    nav.toc li {{ margin: .35em 0; }}
+    nav.toc a {{ color: #444; text-decoration: none;
+                 border-left: 2px solid transparent; padding-left: .6em;
+                 display: block; line-height: 1.35; }}
+    nav.toc a:hover {{ color: #2c5282; }}
+    nav.toc a.active {{ color: #2c5282; font-weight: 600;
+                        border-left-color: #2c5282; }}
+    nav.toc .cross-link {{ margin-top: 1.4em; padding-top: .8em;
+                           border-top: 1px solid #e0e6ef; font-size: .9em; }}
+    nav.toc .cross-link a {{ color: #2c5282; font-weight: 500;
+                              border-left: none; padding-left: 0; }}
+    article {{ min-width: 0; }}
+    @media (max-width: 1100px) {{
+      .layout {{ grid-template-columns: 1fr; max-width: 1100px; }}
+      nav.toc {{ display: none; }}
+    }}
+    details.toc-mobile {{ display: none; margin: 1em 0;
+                          background: #f8f9fb; border: 1px solid #e0e6ef;
+                          padding: .6em 1em; border-radius: 4px; }}
+    details.toc-mobile summary {{ cursor: pointer; font-weight: 600;
+                                  color: #2c5282; }}
+    details.toc-mobile ul {{ list-style: none; padding-left: 0;
+                              margin: .8em 0 .2em 0; }}
+    details.toc-mobile li {{ margin: .3em 0; }}
+    details.toc-mobile a {{ color: #2c5282; text-decoration: none; }}
+    @media (max-width: 1100px) {{
+      details.toc-mobile {{ display: block; }}
+    }}
+    h1 {{ border-bottom: 2px solid #1a1a1a; padding-bottom: .3em; margin-bottom: .2em; }}
+    h2 {{ margin-top: 2.2em; color: #2c5282; padding-bottom: .2em;
+          border-bottom: 1px solid #e0e6ef; scroll-margin-top: 1em; }}
+    h3 {{ color: #2c5282; margin-top: 1.8em; scroll-margin-top: 1em; }}
+    p {{ margin: .8em 0; }}
+    table {{ border-collapse: collapse; margin: 1em 0; }}
+    th, td {{ padding: .35em .8em; border-bottom: 1px solid #ddd; text-align: left;
+              font-size: .92em; }}
+    th {{ background: #f3f5f9; }}
+    table.headline td:nth-child(4) {{ font-weight: bold; color: #2c5282; }}
+    table.headline tr.split-header td {{ background: #eef2f8; font-weight: 600;
+                                          color: #2c5282; font-size: .85em;
+                                          text-transform: uppercase; letter-spacing: .04em;
+                                          padding-top: .55em; }}
+    table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace;
+                         font-size: .82em; }}
+    table.leaderboard td:nth-child(6) {{ font-weight: bold; color: #2c5282; }}
+    /* Sortable-table affordance: a small arrow rendered after the header text
+       so users see the columns are clickable. The JS at the bottom of <body>
+       toggles 'sort-asc' / 'sort-desc' classes that swap the indicator. */
+    table.sortable th {{ cursor: pointer; user-select: none; position: relative;
+                          padding-right: 1.4em; }}
+    table.sortable th::after {{ content: '\\2195'; position: absolute;
+                                 right: .4em; color: #aaa; font-size: .85em; }}
+    table.sortable th.sort-asc::after {{ content: '\\25B2'; color: #2c5282; }}
+    table.sortable th.sort-desc::after {{ content: '\\25BC'; color: #2c5282; }}
+    /* Key-takeaway callout: appears immediately under each <h2>. */
+    .takeaway {{ background: #eef4fb; border-left: 4px solid #2c5282;
+                 padding: .8em 1.1em; margin: .8em 0 1.4em 0;
+                 border-radius: 0 4px 4px 0; font-size: .96em; }}
+    .takeaway b {{ color: #2c5282; }}
+    /* Tooltips (preserved exactly from the previous report). */
+    table.leaderboard span.tt {{ position: relative; border-bottom: 1px dotted #999;
+                                 cursor: help; outline: none; }}
+    table.leaderboard span.tt .tt-body {{
+        display: none; position: absolute; left: 0; top: 1.4em; z-index: 30;
+        background: #1a1a1a; color: #fff; padding: .45em .65em;
+        border-radius: 4px; font-size: .82em; line-height: 1.35;
+        max-width: 22em; white-space: normal;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        box-shadow: 0 2px 6px rgba(0,0,0,.25);
+    }}
+    table.leaderboard span.tt:hover .tt-body,
+    table.leaderboard span.tt:focus .tt-body,
+    table.leaderboard span.tt:focus-within .tt-body {{ display: block; }}
+    .meta {{ color: #666; font-size: .9em; margin-bottom: 1.8em; }}
+    .summary {{ background: #f3f5f9; border-left: 4px solid #2c5282;
+                padding: 1em 1.4em; margin: 1.5em 0; border-radius: 0 4px 4px 0; }}
+    .summary h3 {{ margin-top: 0; color: #2c5282; }}
+    .primer {{ background: #f8f9fb; border: 1px solid #e0e6ef;
+               padding: 1em 1.4em; margin: 1.5em 0; border-radius: 4px;
+               font-size: .94em; }}
+    .primer h3 {{ margin-top: 0; color: #2c5282; }}
+    .primer dt {{ font-weight: 600; margin-top: .55em; }}
+    .primer dd {{ margin: 0 0 .2em 0; }}
+    .caveat {{ background: #fff8e6; border-left: 4px solid #c9a227;
+               padding: .9em 1.2em; margin: 1.2em 0; font-size: .93em;
+               border-radius: 0 4px 4px 0; }}
+    code {{ background: #f3f5f9; padding: 1px 5px; border-radius: 3px;
+            font-size: .9em; }}
+    .footnote {{ color: #666; font-size: .85em; margin-top: 3em;
+                 border-top: 1px solid #eee; padding-top: 1em; }}
+    .cross-page {{ background: #f3f5f9; border-left: 4px solid #2c5282;
+                    padding: 1em 1.4em; margin: 2.5em 0 1em 0;
+                    border-radius: 0 4px 4px 0; }}
+    .cross-page a {{ color: #2c5282; font-weight: 600; }}
+    .nojs-banner {{ background: #fff8e6; border-left: 4px solid #c9a227;
+                    padding: .9em 1.2em; margin: 1em 0; font-size: .93em;
+                    border-radius: 0 4px 4px 0; }}
+    details {{ margin: .8em 0; }}
+    details summary {{ cursor: pointer; font-weight: 600; color: #2c5282; }}
+    details[open] summary {{ margin-bottom: .6em; }}
+    ul {{ margin: .4em 0; }}
+    li {{ margin: .2em 0; }}
+    div[style*='overflow-x:auto'] {{ -webkit-overflow-scrolling: touch; }}
+  </style>
+</head>"""
+
+
+# Vanilla-JS sortable-table + scroll-spy. Inlined at the bottom of <body> on
+# both pages. Keeps the report dependency-free.
+PAGE_SCRIPTS = """
+<script>
+(function(){
+  // ---- Sortable tables ----
+  function parseCell(text) {
+    // Parse '+5.23%' / '-1.40%' / '$1,234,567' / '12,345' / '—' robustly.
+    if (text == null) return -Infinity;
+    var t = String(text).trim();
+    if (t === '' || t === '—' || t === '-' || t === 'n/a') return -Infinity;
+    // Strip $, commas, percent, plus/minus prefix
+    var cleaned = t.replace(/[$,%\\s]/g, '');
+    if (cleaned.charAt(0) === '+') cleaned = cleaned.slice(1);
+    var n = parseFloat(cleaned);
+    if (!isNaN(n) && /^[\\-+]?\\d/.test(cleaned)) return n;
+    return text.toLowerCase();
+  }
+  function compare(a, b) {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    if (a < b) return -1; if (a > b) return 1; return 0;
+  }
+  function sortTable(tbl, colIdx, asc) {
+    var rows = Array.from(tbl.querySelectorAll('tbody tr, tr')).filter(function(r){
+      return r.querySelector('td');
+    });
+    rows.sort(function(r1, r2){
+      var a = parseCell(r1.children[colIdx] && r1.children[colIdx].innerText);
+      var b = parseCell(r2.children[colIdx] && r2.children[colIdx].innerText);
+      var c = compare(a, b);
+      return asc ? c : -c;
+    });
+    var parent = rows[0] && rows[0].parentNode;
+    if (!parent) return;
+    rows.forEach(function(r){ parent.appendChild(r); });
+  }
+  document.querySelectorAll('table.sortable').forEach(function(tbl){
+    var ths = tbl.querySelectorAll('th');
+    ths.forEach(function(th, i){
+      th.addEventListener('click', function(){
+        var asc = !th.classList.contains('sort-asc');
+        ths.forEach(function(h){ h.classList.remove('sort-asc','sort-desc'); });
+        th.classList.add(asc ? 'sort-asc' : 'sort-desc');
+        sortTable(tbl, i, asc);
+      });
+    });
+  });
+
+  // ---- Scroll-spy: highlight the TOC entry for the section currently in view ----
+  var tocLinks = Array.from(document.querySelectorAll('nav.toc a[href^="#"]'));
+  if (tocLinks.length && 'IntersectionObserver' in window) {
+    var idToLink = {};
+    tocLinks.forEach(function(a){ idToLink[a.getAttribute('href').slice(1)] = a; });
+    var sections = Object.keys(idToLink)
+      .map(function(id){ return document.getElementById(id); })
+      .filter(Boolean);
+    var obs = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){
+        if (en.isIntersecting) {
+          tocLinks.forEach(function(a){ a.classList.remove('active'); });
+          var link = idToLink[en.target.id];
+          if (link) link.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-20% 0px -70% 0px', threshold: 0 });
+    sections.forEach(function(s){ obs.observe(s); });
+  }
+})();
+</script>
+"""
+
+
+def _slugify(s: str) -> str:
+    """Convert a section heading to an HTML id. Strips numbering / punctuation."""
+    import re
+    s = re.sub(r"^\s*(NEW\s+)?Section\s+\d+\s*[·:\-]?\s*", "", s, flags=re.I)
+    s = re.sub(r"^\s*\d+[a-z]?\s*[·:\-]\s*", "", s)
+    s = re.sub(r"[^\w\s-]", "", s).strip().lower()
+    s = re.sub(r"[\s-]+", "-", s)
+    return s or "section"
+
+
+def _build_toc(sections: list[tuple[str, str]], cross_link_label: str,
+               cross_link_href: str) -> tuple[str, str]:
+    """Return (sidebar_html, mobile_details_html).
+
+    `sections` is a list of (id, label) tuples in document order.
+    """
+    items = "\n".join(
+        f"      <li><a href='#{escape(sid)}'>{escape(label)}</a></li>"
+        for sid, label in sections
+    )
+    sidebar = f"""<nav class='toc' aria-label='Section navigation'>
+    <h4>On this page</h4>
+    <ul>
+{items}
+    </ul>
+    <div class='cross-link'>
+      <a href='{escape(cross_link_href)}'>&rarr; {escape(cross_link_label)}</a>
+    </div>
+  </nav>"""
+    mobile_items = "\n".join(
+        f"        <li><a href='#{escape(sid)}'>{escape(label)}</a></li>"
+        for sid, label in sections
+    )
+    mobile = f"""<details class='toc-mobile'>
+      <summary>Jump to section &#x25BE;</summary>
+      <ul>
+{mobile_items}
+      </ul>
+      <p style='margin:.5em 0 0 0;'><a href='{escape(cross_link_href)}'>&rarr; {escape(cross_link_label)}</a></p>
+    </details>"""
+    return sidebar, mobile
+
+
+def _reading_time(body_html: str) -> int:
+    """Estimate minutes to read the prose @ 250 wpm.
+
+    Counts only the textual content of <p>, <li>, <h2>, <h3>, <h4>, <summary>,
+    <dt>, <dd>, and <blockquote> elements — i.e. the prose a reader actually
+    reads. Tables, charts, scripts, and styles are excluded because skimmers
+    don't read every cell at 250 wpm; including them inflated the estimate.
+    """
+    import re
+    text = re.sub(r"<script[\s\S]*?</script>", " ", body_html, flags=re.I)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.I)
+    prose_tags = (r"p|li|h2|h3|h4|summary|dt|dd|blockquote")
+    chunks = re.findall(rf"<(?:{prose_tags})\b[^>]*>([\s\S]*?)</(?:{prose_tags})>", text, flags=re.I)
+    words = 0
+    for c in chunks:
+        c = re.sub(r"<[^>]+>", " ", c)
+        words += len(re.findall(r"\w+", c))
+    minutes = max(1, round(words / 250))
+    return minutes
+
+
+# ---------------------------------------------------------------------------
+# Page builders.
+# ---------------------------------------------------------------------------
+
+def _build_index_html(ctx: dict) -> str:
+    """Landing page: where to buy, overlays, macro context, alt ranking, headline."""
+
+    # Section ids + labels for the TOC (in document order).
+    sections = [
+        ("executive-summary", "Executive summary"),
+        ("how-to-read", "How to read this report"),
+        ("where-to-buy", "1. Where might the model want to buy today?"),
+        ("personal-overlay", "2. Personal-overlay shortlists (Phase 4)"),
+        ("macro-context", "3. Macro context: timing + hedges"),
+        ("alt-ranking", "4. Alternative ranking: yield-aware total return"),
+        ("headline-results", "5. Headline results"),
+    ]
+    toc_sidebar, toc_mobile = _build_toc(
+        sections,
+        cross_link_label="Methodology + deep dive",
+        cross_link_href="methods.html",
+    )
+
+    # Pull the renumbered overlay HTML (h2 9 -> Section 2).
+    overlay_html = _rewrite_overlay_headings(ctx["overlay_section_html"])
+
+    body_inner = f"""
+  {toc_mobile}
+  <h1>What predicts US residential real-estate returns?</h1>
+  <p class='meta' id='meta-line'>arbok study &middot; generated {BUILD_DATE} &middot; all data from free / public sources</p>
+
+  <div class='summary' id='executive-summary'>
+    <h3>Executive summary</h3>
+    <ul>
+      <li><b>Headline decile spread.</b> On the 3-year horizon (post-2012 split), the model's
+          top-decile ZIPs averaged <b>{ctx['hd_top']:+.2f}%</b> realized returns vs. the
+          bottom decile at <b>{ctx['hd_bot']:+.2f}%</b> &mdash; a <b>{ctx['hd_spread']:+.2f}-point</b>
+          out-of-sample spread.</li>
+      <li><b>Backtest hit-rate.</b> Replaying month-by-month from 2018-01 through 2021-12
+          ({ctx['bt_price_n']} basket-formation months &times; 3y hold), the top-decile basket
+          beat the equal-weight universe in <b>{ctx['bt_price_hit']:.1f}%</b> of months at
+          roughly <b>+{ctx['bt_price_excess']:.2f}&nbsp;pp/yr</b> alpha.</li>
+      <li><b>Timing verdict.</b> The model's current ({ctx['ts_month']}) universe-mean
+          predicted fwd_3y annualized return is <b>{ctx['ts_current']*100:+.2f}%</b> &mdash;
+          the <b>{ctx['ts_pct']:.0f}th percentile</b> of post-2012 history. The model is currently
+          <b>{ctx['ts_verdict']}</b> vs. its historical baseline.</li>
+      <li><b>Hedge comparison.</b> US residential RE comes <b>last in an 8-asset cohort</b> on
+          median 3y real return (<b>{ctx['zhvi_3y_median']*100:+.1f}%</b>); BTC and gold lead,
+          REITs/equities mid-pack. Caveat: ZHVI is unlevered and ignores rent.</li>
+      <li><b>Non-obvious finding.</b> Drawdown vs. the trailing-60-month ZHVI peak is the
+          #1 mean-abs SHAP feature at fwd_1y &mdash; cross-sectional mean reversion is the
+          dominant short-horizon signal, not demographics or schools.</li>
+    </ul>
+  </div>
+
+  <div class='primer' id='how-to-read'>
+    <h3>How to read this report (a 60-second primer)</h3>
+    <p>This report uses some specialized terms repeatedly. The shortest possible definitions:</p>
+    <dl>
+      <dt>ZIP / metro (CBSA)</dt>
+      <dd>A ZIP code is a USPS postal area (~22,000 across the US). A "metro" &mdash; Census's
+          Core-Based Statistical Area or <b>CBSA</b> &mdash; is a grouping of nearby ZIPs that
+          share a labor market. We restrict to the top 100 metros by population.</dd>
+      <dt>Forward return (fwd_1y, fwd_3y, fwd_5y)</dt>
+      <dd>"fwd_3y" is the price change of a typical home in a ZIP over the next 3 years,
+          annualized. The model uses only information available <i>at the start</i> of the
+          holding period &mdash; no peeking ahead.</dd>
+      <dt>ZHVI / ZORI</dt>
+      <dd>Zillow's monthly Home Value Index (the price level we predict) and Observed Rent Index
+          (the yield-aware variant of the model).</dd>
+      <dt>LightGBM</dt>
+      <dd>A gradient-boosted decision-tree model &mdash; the standard ML workhorse for tabular
+          data. The headline model in this report; the appendix compares it to ElasticNet and a
+          demographics-only hedonic baseline.</dd>
+      <dt>SHAP</dt>
+      <dd>For each prediction, SHAP attributes a contribution to every input feature.
+          Top-SHAP features tell us what the model relies on most. See the methodology page.</dd>
+      <dt>Decile spread</dt>
+      <dd>The realized return of the top 10% of ZIPs the model ranked highest, minus the
+          bottom 10%. The bottom-line "would picking this model's top zips have helped?" number.</dd>
+      <dt>Backtest</dt>
+      <dd>Replay history. At each past month, we run the model on data available <i>then</i>,
+          take its top-decile picks, and check what those ZIPs actually returned 3 years later.</dd>
+    </dl>
+    <p style='margin-top: 1em;'><a href='methods.html'>Want the full glossary, validation
+       methodology, and SHAP-by-horizon? &rarr; Read the deep dive</a></p>
+  </div>
+
+  <h2 id='where-to-buy'>1. Where might the model want to buy today?</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Kansas City, Memphis, Detroit and St. Louis-area ZIPs dominate the
+    top picks; predictions cluster around <b>+5&ndash;7%</b> annualized over 3 years with a
+    median <b>&plusmn;{ctx['band_width']:.0f} pp</b> uncertainty band per ZIP. Bet sizing
+    should reflect the band, not the point estimate.
+  </div>
+  {ctx['map_link_html']}
+  <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
+     <b>top-100</b> US metros at the most recent month with enough feature coverage to make a
+     confident prediction. The table below is rolled up to <b>one row per metro (CBSA)</b>,
+     showing the metro's principal (largest-population) city, the best-scoring ZIP inside that
+     metro, the mean predicted return across the metro's top-5 ZIPs, and how many of its ZIPs
+     land in the top 10% of all predictions nationally. <b>Hover over any feature</b> for its
+     description; <b>click any column header</b> to sort.</p>
+  {ctx['leaderboard_html']}
+
+  <h3>1a. ZIP-level detail (top 20)</h3>
+  <p>The same model expanded back to per-ZIP rows for users who want to drill into specific
+     neighborhoods rather than cities.</p>
+  {ctx['zip_leaderboard_html']}
+
+  <div class='caveat'>
+    <b>Important caveats on the leaderboard:</b>
+    <ul style='margin-top: .4em; margin-bottom: 0;'>
+      <li><b>The p10/p90 bands tell the real story.</b> Top zips show point predictions of
+          +5% to +7%, but the 80% prediction interval per zip spans roughly
+          [<b>{ctx['band_p10']:+.1f}%</b>, <b>{ctx['band_p90']:+.1f}%</b>] &mdash; a
+          <b>{ctx['band_width']:.1f}-point</b> band on median.</li>
+      <li>The negative SHAP contribution from <code>fred.real_rate_10y</code> appears for every
+          zip &mdash; it's not a zip-specific signal, just "rates are high right now."</li>
+      <li>This is a model output, not investment advice. The model is unaware of zoning,
+          school districts, walkability, specific listings, or your personal constraints.</li>
+    </ul>
+  </div>
+
+  <h2 id='personal-overlay'>2. Personal-overlay shortlists (Phase 4)</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Two pre-filtered shortlists. The owner-occupier picks land mostly in
+    DC-metro suburbs ({escape(ctx['owner_occ_concentration'])}); the investor picks spread
+    across ~15 mid-tier metros at a median <b>13.7% gross rent yield</b>.
+  </div>
+  {overlay_html}
+
+  <h2 id='macro-context'>3. Macro context: is now a good time? And how does RE stack up against other hedges?</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> The model predicts the broad RE universe will return
+    <b>{ctx['ts_current']*100:+.2f}%/yr</b> over the next 3 years &mdash; the
+    <b>{ctx['ts_pct']:.0f}th percentile</b> of post-2012 history. Across 25 years of monthly
+    rolling windows, residential RE has trailed every other inflation hedge in our cohort
+    (BTC, gold, equities, REITs) before leverage and rent are added back.
+  </div>
+  <p>Everything above is about <i>where</i> to buy. The two questions below are about
+     <i>when</i> and <i>what else</i>: does the model think the broad RE universe is cheap or
+     expensive right now, and how has private RE actually fared against the other classic
+     inflation hedges (stocks, gold, REITs, BTC) when you put them on the same axis?</p>
+
+  <h3>3a. Is now a good time to buy?</h3>
+  <p>For each month from 2014 through the latest in the panel, we score every top-100-metro ZIP
+     with the headline post-2012 LightGBM and take the universe mean of the predicted fwd_3y
+     annualized return. The model's prediction at month <i>t</i> can be compared to the
+     <i>realized</i> universe-mean fwd_3y return three years later (dashed line) for all months
+     where t+3y is observable.</p>
+  {ctx['timing_chart_html']}
+  <p>The model's current ({ctx['ts_month']}) universe-mean predicted fwd_3y annualized return is
+     <b>{ctx['ts_current']*100:+.2f}%</b> (median of the per-ZIP distribution that month;
+     {ctx['ts_n_zips']:,} ZIPs scored, 80% prediction interval roughly
+     [<b>{ctx['ts_p10']*100:+.2f}%</b>, <b>{ctx['ts_p90']*100:+.2f}%</b>]). The historical
+     median across all scored months in the post-2012 panel is <b>{ctx['ts_med']*100:+.2f}%</b>
+     with an interquartile range of [<b>{ctx['ts_q25']*100:+.2f}%</b>,
+     <b>{ctx['ts_q75']*100:+.2f}%</b>]. The current prediction sits at the
+     <b>{ctx['ts_pct']:.0f}th percentile</b> of history &mdash; the model is currently
+     <b>{ctx['ts_verdict']}</b> vs the historical baseline (n = {ctx['ts_n_hist']} months scored).</p>
+
+  <div class='caveat'>
+    <b>Read the timing chart carefully.</b> The model was trained on data &le; 2017-12 with a
+    test window of 2018-01 onward, so anything from 2014-2017 is in-sample. From 2018 forward,
+    the gap between blue (predicted) and green (realized) is honest out-of-sample error. The
+    model under-predicted the 2020-2022 COVID-era surge &mdash; a regime the training set
+    didn't cover &mdash; and is now predicting near-zero / mildly negative returns because
+    trailing real-rate prints are at decade-plus highs.
+  </div>
+
+  <h4>How wide is the model's uncertainty over time?</h4>
+  <p>Three separate LightGBM models trained at the 10th, 50th, and 90th conditional quantiles
+     produce an 80% prediction band around the median. When the band is narrow, the model is
+     confident; when it widens, it is hedging.</p>
+  {ctx['fan_html']}
+
+  <h3>3b. Real estate vs other inflation hedges</h3>
+  <p>Real estate is rarely held in isolation in a real portfolio &mdash; the question "is now
+     a good time to buy a house" is really "is real estate the best use of the marginal dollar
+     right now". We put residential RE on the same chart as the S&amp;P 500, broad equities
+     (VTI), publicly-traded REITs (IYR / VNQ), gold, and Bitcoin, all in <b>real</b> terms
+     (net of CPI). Residential RE is measured <i>unlevered</i> and <i>net of nothing</i>
+     (rent, maintenance, property tax, transaction costs all ignored) &mdash; conservative
+     for RE since the typical homeowner has both leverage and carrying costs.</p>
+
+  <h4>Historical 3y / 5y annualized real returns (rolling, since 2000)</h4>
+  {ctx['hedge_hist_html']}
+
+  <h4>Trailing 3-year real returns ending the most recent month</h4>
+  {ctx['hedge_trail_html']}
+
+  <h4>Cumulative real return per asset, 2000-now (log scale)</h4>
+  {ctx['hedge_chart_html']}
+
+  <p><b>What beat what.</b> Across the full 2000-now history of monthly rolling windows, the
+     median 3-year annualized real return ranking is dominated by Bitcoin
+     (<b>{ctx['hedge_winner_3y_median'][1]*100:+.1f}%</b>, on a much shorter post-2014 history
+     and with extreme tail risk) and then by gold and broad-equity / S&amp;P 500 total return.
+     REITs sit in the <b>+4&ndash;6%</b> range. The Zillow ZHVI top-100 mean &mdash; our
+     private-RE benchmark, <i>before</i> leverage and <i>before</i> rent &mdash; comes in at
+     <b>{ctx['zhvi_3y_median']*100:+.2f}%</b> median 3y real, ranking
+     <b>#{ctx['zhvi_rank']}/{ctx['n_assets']}</b>. The trailing-3y leader as of the latest
+     month is <b>{escape(ctx['hedge_winner_trailing'][0])}</b> at
+     <b>{ctx['hedge_winner_trailing'][1]*100:+.2f}%</b> real.</p>
+
+  <div class='caveat'>
+    <b>Honest caveats on the hedge comparison:</b>
+    <ul style='margin-top: .4em; margin-bottom: 0;'>
+      <li><b>BTC selection bias.</b> Bitcoin's history starts in 2014, a strictly post-GFC,
+          mostly-bull-market regime. Other assets include 2000-2002 and 2008-2009.</li>
+      <li><b>REITs are not private RE.</b> IYR/VNQ are leveraged, mark-to-market, and earn
+          public-market liquidity premia. Best free TR proxy, but different animal.</li>
+      <li><b>ZHVI ignores rent, maintenance, and property tax.</b> The yield-aware
+          <code>fwd_3y_total</code> model in Section 4 partially addresses this per ZIP.</li>
+      <li><b>No leverage assumed.</b> Real-estate investors typically run 4&ndash;5&times;
+          leverage; the equity assets here are unlevered.</li>
+    </ul>
+  </div>
+
+  <h2 id='alt-ranking'>4. Alternative ranking: yield-aware total return</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> A separate model trained on price + rent carry produces a substantially
+    different shortlist &mdash; only ~22% overlap with the price-only top-50 &mdash; tilted
+    toward rust-belt high-yield ZIPs (Detroit, Cleveland, Dayton) at a median <b>15.8%</b>
+    gross rent yield. Useful for cash-flow investors; smaller universe than the price-only run.
+  </div>
+  <p>Everything in Section 1 ranks zips by predicted <i>price</i> appreciation. An investor
+     who cares about yield (rent flowing in, not just paper appreciation) wants a different
+     ranking: a separate LightGBM trained on
+     <code>fwd_3y_total = price_return + ZORI rent yield carry</code>. The leaderboard below
+     shows the top 30 zips by that target. Caveat: ZORI covers only ~11% of zip-months, so
+     this ranking's universe is much smaller (~2K zips vs ~10K for the price-only model).</p>
+  {ctx['total_leaderboard_html']}
+  <p>The decision-different finding: only <b>11 of 50</b> zips appear in both this and the
+     price-only top 50 &mdash; a 22% overlap. Price-only tilts toward sunbelt fringe (Tulsa,
+     Kansas City, Memphis, New Orleans) at median rent yield ~12.5%. Total-return is dominated
+     by rust-belt high-yield zips (Detroit &times;7, Cleveland &times;5, Dayton, Akron, Toledo,
+     Birmingham) at median rent yield ~15.8%. Same model architecture, just yield-aware
+     &rarr; very different shortlist.</p>
+
+  <h2 id='headline-results'>5. Headline results</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> The best-performing model for each horizon, on both temporal splits.
+    The post-2012 block is the main result; the pre-2008 block is a stress test through the
+    housing crisis. A signal that shows up in both is much harder to dismiss as overfitting
+    to one regime.
+  </div>
+  <p>The table below picks the best-performing model for each horizon, reported on <b>both</b>
+     temporal splits. The post-2012 block is the main result (larger, more recent test window);
+     the pre-2008 block is a stress test through the 2008 housing crisis. A signal that shows
+     up in both &mdash; same sign, same order-of-magnitude spread &mdash; is much harder to
+     dismiss as overfitting to one regime.</p>
+  {ctx['headline_html']}
+
+  <div class='caveat'>
+    <b>Why R&sup2; is not reported as the primary metric:</b> traditional R&sup2; is negative
+    on both test windows for nearly every model. This is not a model failure &mdash; it's a
+    property of the test windows. Both contain regime shifts (housing crash; rate shock + COVID)
+    where the mean realized return is very different from the training period. <i>Spatial
+    ranking</i> (Spearman + decile spread) is intact and is what matters for a buy-this-zip-
+    not-that-zip decision.
+  </div>
+
+  <div class='cross-page'>
+    <b>Want to see the methodology, validation, and feature attribution?</b>
+    &rarr; <a href='methods.html'>Read the deep dive</a> (CV robustness, portfolio backtest,
+    SHAP by horizon, price stratification, caveats).
+  </div>
+
+  <p class='footnote'>arbok &middot; model-first, personal-overlay layered on top &middot;
+     all data free / public sources &middot; code at <code>src/arbok/</code></p>
+"""
+
+    minutes = _reading_time(body_inner)
+    # Inject reading-time into the meta line.
+    body_inner = body_inner.replace(
+        f"arbok study &middot; generated {BUILD_DATE} &middot; all data from free / public sources",
+        f"~{minutes} min read &middot; generated {BUILD_DATE} &middot; all data from free / public sources",
+        1,
+    )
+
+    return f"""{_html_head(PAGE_TITLE_BASE)}
+<body>
+  <noscript>
+    <div class='nojs-banner'>
+      <b>Interactive charts require JavaScript.</b> The data tables and the
+      written analysis in each section will still render without it; the
+      hover-tooltips, sortable columns, and Plotly visualisations will not.
+    </div>
+  </noscript>
+  <div class='layout'>
+  {toc_sidebar}
+  <article>
+{body_inner}
+  </article>
+  </div>
+{PAGE_SCRIPTS}
+</body>
+</html>
+"""
+
+
+def _build_methods_html(ctx: dict) -> str:
+    """Methodology + deep-dive page: CV robustness, backtest, SHAP, stratification."""
+
+    sections = [
+        ("why-this-study", "Why this study exists"),
+        ("setup", "The setup in one minute"),
+        ("confidence", "1. Confidence: walk-forward + spatial robustness"),
+        ("backtest", "2. Did this actually work? — portfolio backtest"),
+        ("decile-spread", "3. Decile spread, every model × horizon × split"),
+        ("shap", "4. What did the model learn? — SHAP feature importance"),
+        ("price-stratification", "5. Does the signal survive price stratification?"),
+        ("caveats", "Caveats and what's not in this run"),
+    ]
+    toc_sidebar, toc_mobile = _build_toc(
+        sections,
+        cross_link_label="Back to the results page",
+        cross_link_href="index.html",
+    )
+
+    body_inner = f"""
+  {toc_mobile}
+  <h1>Methodology &amp; deep dive</h1>
+  <p class='meta' id='meta-line'>arbok study &middot; generated {BUILD_DATE} &middot; all data from free / public sources</p>
+
+  <p><a href='index.html'>&larr; Back to the results landing page</a></p>
+
+  <h2 id='why-this-study'>Why this study exists</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Most "where should I buy?" advice is qualitative or single-metric.
+    This study casts a wide net (140+ candidate predictors) and lets out-of-sample model
+    performance + SHAP attribution decide what actually moves forward returns.
+  </div>
+  <p>Residential real estate is the largest asset class most people will ever own, and the
+     conventional wisdom for picking <i>where</i> and <i>when</i> to buy is dominated by
+     qualitative heuristics (school districts, "up-and-coming neighborhoods", proximity to
+     Whole Foods) or single-metric proxies (population growth, median income). This study
+     asks: which of these signals actually predict forward returns, and by how much,
+     separated by time horizon &mdash; and are there underweighted predictors that the
+     textbook approach misses?</p>
+  <p>The framing is deliberately quantitative. We built a 3.73-million-row panel of every zip
+     code in the top 100 US metros, monthly, 2000-2026, joined with 140+ candidate predictors
+     organized into 11 thematic classes. We trained gradient-boosted models to predict 1-, 3-,
+     and 5-year forward home-price returns on two backtest windows: pre-2008 (GFC stress test)
+     and post-2012 (rate-shock + COVID).</p>
+
+  <h2 id='setup'>The setup in one minute</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Predict 1y / 3y / 5y forward home-price returns per ZIP, using only
+    information available at the start of the holding period. Two temporal splits (pre-2008,
+    post-2012) plus walk-forward and spatial CV.
+  </div>
+
+  <h3>What we predict</h3>
+  <p>For each zip code at each month, we compute the forward home-price return (Zillow ZHVI
+     index) over three horizons &mdash; 1 year, 3 years, 5 years &mdash; annualized for the
+     latter two. These are the <i>targets</i> our models try to learn from upstream features.</p>
+  <p>The chart below illustrates what those forward windows look like for a single real ZIP.
+     The diamond marks an example "prediction date"; the three shaded windows are the 1-, 3-,
+     and 5-year forward periods we score the model against. <i>Predict-only-on-what-you-knew-
+     at-time-t, score-on-what-actually-happened-by-time-t+h</i> is the discipline that makes
+     the backtest honest.</p>
+  {ctx['fwd_illus_html']}
+
+  <h3>How we predict it</h3>
+  <p>For each (zip, month) row, we join a wide set of features that were <i>knowable at that
+     time</i> (with explicit publication-lag adjustment per source &mdash; e.g., HMDA mortgage
+     data isn't available until 9 months after the year it describes). We then train two
+     families of models per horizon:</p>
+  <ul>
+    <li><b>Baselines:</b> predict the global mean; predict the within-metro mean; OLS
+        regression on Census demographics only ("hedonic"). These are what a real model has
+        to beat.</li>
+    <li><b>Real models:</b> ElasticNet (regularized linear, interpretable) and LightGBM
+        (gradient-boosted trees, captures interactions). Both report Spearman rank correlation
+        and decile spread on out-of-sample test data; LightGBM additionally produces SHAP
+        feature attributions.</li>
+  </ul>
+
+  <h3>How we validate</h3>
+  <p>Two temporal splits, both reported in this run:</p>
+  <ul>
+    <li><b>pre_2008 split:</b> train on data through 2007-12, test on 2008-2013. Stress-tests
+        whether the model breaks across the 2008 housing crisis (the "GFC" &mdash; Global
+        Financial Crisis).</li>
+    <li><b>post_2012 split:</b> train through 2017-12, test on 2018-2024. Stress-tests across
+        the Fed's 2022 rate hike cycle (the "rate shock") and the COVID-era demand surge.</li>
+  </ul>
+  <p>This run additionally reports <b>spatial cross-validation</b> (hold out entire CBSAs) and
+     <b>walk-forward CV</b> (rolling 12-month test windows) on top of the two static splits
+     &mdash; see Section 1 below.</p>
+
+  <details>
+    <summary>14 thematic feature classes (click to expand)</summary>
+    <p>The current feature store covers 22 data sources organized into 11 thematic classes,
+       producing 140+ modeling features after coverage filtering. Hover over any feature name
+       in the SHAP charts below for a one-line description.</p>
+    <ul>
+      <li><b>Macro / rates:</b> 30Y mortgage, 10Y TIPS, M2, Case-Shiller, lumber, US
+          unemployment + their 1/3/12-month deltas (FRED)</li>
+      <li><b>Inventory:</b> months-of-supply, days-on-market, price cuts, active/new/pending
+          listings per zip (Realtor.com)</li>
+      <li><b>Demographics:</b> population by age cohort, household income, education, home
+          value, rent, owner-occupancy at ZCTA (Census ACS, 10 vintages 2013-2022); per-capita
+          personal income at county (BEA)</li>
+      <li><b>Migration:</b> county-to-county AGI flow (IRS SOI)</li>
+      <li><b>Supply:</b> building permits at MSA (Census BPS); business establishments +
+          employment per zip (Census ZBP)</li>
+      <li><b>Jobs:</b> wages + YoY growth at county (BLS QCEW); monthly unemployment rate at
+          county (BLS LAUS)</li>
+      <li><b>Affordability / cost of living:</b> effective property-tax rate per ZCTA (ACS
+          B25103 / B25077); HUD Small-Area Fair Market Rent per ZIP; residential electricity
+          price per state (EIA)</li>
+      <li><b>Healthcare:</b> CMS Hospital Compare star ratings + bed counts by county; County
+          Health Rankings composite + headline measures (life expectancy, premature death,
+          smoking, obesity)</li>
+      <li><b>Schools:</b> NCES district-year enrollment, pupil-teacher ratio, free-lunch
+          share, per-pupil spending &mdash; county-broadcast</li>
+      <li><b>Politics:</b> county presidential vote share + winning margin (MIT Election Lab,
+          2000-2024)</li>
+      <li><b>Climate:</b> trailing-10-year disaster declarations by category (OpenFEMA);
+          flood, wildfire, hurricane, heatwave risk scores at tract (FEMA NRI); annual PM2.5
+          + ozone air quality (EPA AQS)</li>
+      <li><b>Amenities + infrastructure:</b> EV charging stations per zip (DOE AFDC)</li>
+      <li><b>Behavioral:</b> monthly Wikipedia pageviews per metro article (search-interest
+          proxy)</li>
+      <li><b>Derived (no new data):</b> gross rental yield = 12 &times; ZORI / ZHVI; rolling
+          24-mo ZHVI volatility; ZHVI drawdown vs trailing-60-mo peak</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>Pending modules with code ready but waiting on credentials (click to expand)</summary>
+    <p>HMDA (tract-level mortgage records &mdash; currently only state-level aggregations),
+       FCC BDC broadband, NOAA VIIRS satellite nightlights, Foursquare POIs (Whole Foods /
+       coffee / breweries), FBI NIBRS county-year crime rates (needs <code>CDE_API_KEY</code>),
+       USAspending federal $ flows.</p>
+  </details>
+
+  <h2 id='confidence'>1. Confidence: walk-forward and spatial robustness</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> The headline fwd_3y Spearman survives both stronger CV regimes.
+    Walk-forward over {ctx['wf3_n']} rolling 12-month windows gives
+    &rho; = <b>{ctx['wf3_mean']:+.3f} &plusmn; {ctx['wf3_std']:.3f}</b>; spatial-CV
+    (whole-CBSA holdout) on the within-metro residual gives &rho; =
+    <b>{ctx['sp_dem_sp']:+.3f}</b> &mdash; the genuine cross-sectional alpha after stripping
+    out the "expensive zips stay expensive" level effect.
+  </div>
+  <p>A single train/test split can flatter or punish a model by accident. Two stronger CV
+     regimes re-run the post-2012 LightGBM to bound how much of the headline number is
+     structural vs. noise.</p>
+
+  <h3>1a. Walk-forward CV (rolling-origin)</h3>
+  <p>Train through year T&minus;1, test on year T; roll the cutoff from 2018-12 through
+     2022-12. Five test years per horizon (fewer for fwd_5y, which would need observability
+     beyond the panel's end). The schematic below shows the sliding window: each row is one
+     fold, blue is the training range, green is the held-out test year.</p>
+  {ctx['wf_schematic_html']}
+  {ctx['walkforward_html']}
+  <p>For the headline fwd_3y horizon, mean Spearman &rho; = <b>{ctx['wf3_mean']:+.3f}</b> with
+     std <b>{ctx['wf3_std']:.3f}</b> across {ctx['wf3_n']} folds &mdash; the
+     <b>+{ctx['static_fwd3y_spearman']:.3f}</b> figure from the single static post-2012 split
+     survives in expectation, but with meaningful year-to-year noise. 2020 is the variance
+     driver, as expected.</p>
+
+  <h3>1b. Spatial CV (whole-CBSA holdout)</h3>
+  <p>5-fold CBSA holdout, with train+test both restricted to &le; 2017-12 so the only
+     stressor is the spatial axis (no temporal regime shift). Two variants: the <b>raw</b>
+     model predicts the price return directly; the <b>demeaned</b> model predicts the
+     within-metro residual &mdash; i.e., the model is given each ZIP's return after
+     subtracting the average return of every other ZIP in the same metro that month. That
+     isolates "can the model rank ZIPs <i>inside</i> a metro?" from the easier question
+     "can the model tell expensive metros from cheap ones?".</p>
+  <p>The plot below shows the actual partition: every top-100 metro is assigned to exactly
+     one of five folds (color). Bubble size = metro population.</p>
+  {ctx['sp_fold_html']}
+  <h4>Raw fwd_3y</h4>
+  {ctx['spatial_raw_html']}
+  <h4>Demeaned (within-metro residual) fwd_3y</h4>
+  {ctx['spatial_dem_html']}
+  <p><b>The headline lesson.</b> The raw model's Spearman &rho; = <b>{ctx['sp_raw_sp']:+.3f}</b>
+     with decile spread <b>{ctx['sp_raw_spread']*100:+.2f}%</b> looks spectacular &mdash; but
+     most of it is a level effect ("expensive zips stay expensive"). The demeaned model's
+     Spearman &rho; = <b>{ctx['sp_dem_sp']:+.3f}</b> with decile spread
+     <b>{ctx['sp_dem_spread']*100:+.2f}%</b> is the genuine cross-sectional alpha.</p>
+
+  <h2 id='backtest'>2. Did this actually work? — portfolio backtest</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Replaying the strategy month-by-month from 2018-01 through 2021-12,
+    the top-decile basket beat the equal-weight universe in <b>{ctx['bt_price_hit']:.1f}%</b>
+    of months at <b>+{ctx['bt_price_excess']:.2f} pp/yr</b> alpha. The yield-aware variant
+    hits <b>{ctx['bt_total_hit']:.1f}%</b> at <b>+{ctx['bt_total_excess']:.2f} pp/yr</b> on a
+    smaller yield-observable universe.
+  </div>
+  <p>The most decision-relevant question. We replay history: at each month from 2018-01
+     through 2021-12, we run the model with only the data it could have seen at that time,
+     take its top-decile picks (a "basket" of about 1,000 ZIPs), and look up what those ZIPs
+     actually returned 3 years later. Compare to the universe mean (equal-weight all ZIPs)
+     and to the bottom-decile basket. <b>Alpha</b> is the basket's excess annualized return
+     over the universe mean.</p>
+  {ctx['backtest_chart_html']}
+  {ctx['backtest_table_html']}
+  <p><b>The model adds skill.</b> The price-only fwd_3y headline model's top decile beat the
+     universe mean in <b>{ctx['bt_price_hit']:.1f}%</b> of months ({ctx['bt_price_n']}/{ctx['bt_price_n']}),
+     earning roughly <b>+{ctx['bt_price_excess']:.2f} percentage points per year</b> alpha
+     and a <b>+{ctx['bt_price_spread']:.2f} pp/yr</b> top-vs-bottom spread. The yield-aware
+     <code>fwd_3y_total</code> model is in another class &mdash; <b>{ctx['bt_total_hit']:.1f}%</b>
+     hit rate, <b>+{ctx['bt_total_excess']:.2f} pp/yr</b> alpha &mdash; but its scoring
+     universe is much smaller (only ZIPs where Zillow publishes rent data).</p>
+
+  <h3>2a. Per-cohort wealth: $1 in, $? out after 3 years</h3>
+  <p>The same backtest expressed as terminal wealth. For each entry month, $1 invested in the
+     top-decile basket, the universe, or the bottom-decile basket is compounded forward for
+     the full 3-year hold.</p>
+  {ctx['eq_curve_html']}
+
+  <h3>2b. Calibration &mdash; is the model a good ranker, a good forecaster, or both?</h3>
+  <p>A model can rank ZIPs correctly yet still be mis-calibrated &mdash; predicting +3% when
+     realized averages +7%. We bin every test-set prediction into 20 quantile buckets and
+     plot mean predicted vs mean realized in each bucket. Points on the dashed line are
+     perfectly calibrated.</p>
+  {ctx['calib_html']}
+  <p>The cloud's <i>slope</i> is the rank quality (steeper = stronger ranking); the cloud's
+     <i>shift</i> relative to the diagonal is the calibration error. A model can have a steep
+     slope but sit far below the diagonal &mdash; useful for picking but biased in level.
+     That pattern is exactly what we'd expect in a regime-shift test window like post-2012,
+     and is why R&sup2; is not the headline metric.</p>
+
+  <h2 id='decile-spread'>3. Decile spread, every model &times; horizon &times; split</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> LightGBM wins decisively on the medium and long horizons in the
+    post-2012 split; the demographics-only hedonic baseline edges it at fwd_1y &mdash;
+    a useful sanity check that the signal lives in the data, not the algorithm.
+  </div>
+  <p>Each bar is one model on one horizon on one test window. Positive values mean the
+     model's top-decile picks beat its bottom-decile picks; negative values mean it
+     anti-ranked. The left panel is the pre-2008 split (smaller and noisier); the right is
+     post-2012 (the main result).</p>
+  {ctx['decile_html']}
+
+  <h3>3a. Realized return by predicted decile (headline horizon &times; split)</h3>
+  <p>The chart above collapses each (model, horizon, split) into a single "top minus bottom"
+     number. The one below zooms into the headline (post-2012 LightGBM, fwd_3y) and shows the
+     realized return of <i>every</i> decile, not just the extremes. A monotone climb from
+     decile 1 &rarr; decile 10 is the strong-form claim: the model is ordering ZIPs, not just
+     separating the very best from the very worst.</p>
+  {ctx['decile_curve_html']}
+
+  <p>LightGBM wins decisively on the medium and long horizons in the post-2012 split. On the
+     1-year horizon, the demographics-only hedonic baseline (a simple linear regression using
+     only Census ACS variables) actually edges LightGBM &mdash; a useful sanity check that
+     when a simple baseline ties a sophisticated model, the signal probably comes from the
+     data more than the algorithm.</p>
+
+  <h2 id='shap'>4. What did the model learn? — SHAP feature importance</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Real rates dominate medium/long-horizon SHAP (10Y TIPS yield is the
+    biggest mean-abs feature at fwd_3y and fwd_5y); drawdown vs trailing peak dominates at
+    fwd_1y (mean reversion). County Republican vote share and Wikipedia pageviews show up in
+    the top 10 at multiple horizons &mdash; identity / attention proxies the textbook
+    real-estate model doesn't include.
+  </div>
+  <p>For each horizon, we compute mean absolute SHAP value per feature on the training
+     sample. SHAP decomposes each prediction into per-feature contributions. The bars below
+     show the 15 features that the LightGBM model used most heavily.</p>
+  <h3>Short horizon (1 year)</h3>
+  {ctx['shap_1y_html']}
+  <h3>Medium horizon (3 years)</h3>
+  {ctx['shap_3y_html']}
+  <h3>Long horizon (5 years)</h3>
+  {ctx['shap_5y_html']}
+
+  <h3>4a. Per-ZIP attribution &mdash; why this ZIP, not that one?</h3>
+  <p>The aggregate SHAP charts above answer "which features does the model rely on, on
+     average?" The two waterfalls below answer the more decision-relevant version: <i>for
+     this specific ZIP, which features pushed its predicted return up or down, and by how
+     much?</i> Green bars push the prediction higher than the model's base rate; red bars
+     push it lower.</p>
+  <h4>Top-decile example</h4>
+  {ctx['shap_top_html']}
+  <h4>Bottom-decile example</h4>
+  {ctx['shap_bot_html']}
+  <p>The pattern that recurs across nearly every top-decile ZIP: a large positive contribution
+     from the drawdown feature combined with a uniform negative contribution from the 10Y real
+     rate. Bottom-decile ZIPs typically show the opposite.</p>
+
+  <p><b>Four findings worth flagging:</b></p>
+  <ul>
+    <li><b>Drawdown is the #1 short-horizon predictor.</b> The derived "ZHVI drawdown vs
+        trailing 60-month peak" feature carries the largest mean-abs SHAP at fwd_1y. Zips
+        that have fallen most relative to their recent peak tend to snap back hardest &mdash;
+        a clean cross-sectional mean-reversion signal.</li>
+    <li><b>Real rates dominate medium/long by a wide margin.</b> At fwd_3y, 10Y TIPS yield's
+        mean-abs SHAP is more than 4&times; the next-largest feature; at fwd_5y, more than
+        3&times;. Medium and long-horizon ranking is mostly about macro conditions, not
+        zip-specific properties.</li>
+    <li><b>New political + behavioral features are earning their keep.</b> County Republican
+        vote share (MIT Election Lab) appears in the top 10 for every horizon &mdash; and at
+        fwd_5y, both party vote shares appear, so the model is reading the political-identity
+        gradient, not taking sides. Wikipedia metro-article pageviews ranks #3 at fwd_3y.</li>
+    <li><b>Climate has receded to a short-horizon signal.</b> FEMA disaster counts and NRI
+        wildfire risk drop out of the top 10 for fwd_3y and fwd_5y under the expanded feature
+        pool, while staying in fwd_1y &mdash; most likely capturing short-term storm-driven
+        price dynamics.</li>
+  </ul>
+
+  <h2 id='price-stratification'>5. Does the signal survive price stratification?</h2>
+  <div class='takeaway'>
+    <b>Bottom line:</b> Decile spreads of <b>{ctx['lo_spread']*100:+.2f}%</b> /
+    <b>{ctx['mid_spread']*100:+.2f}%</b> / <b>{ctx['hi_spread']*100:+.2f}%</b> across
+    &lt;$200K / $200K&ndash;$500K / $500K+ tiers &mdash; the model isn't merely buying cheap
+    homes.
+  </div>
+  <p>A common worry with any model that ranks zip codes is that it has secretly learned a
+     price-level proxy: cheap zips mean-revert upward, expensive zips compound more slowly,
+     and the "alpha" is just a roundabout way of buying low. To check that, we split the
+     post-2012 test set into three ZHVI tiers and re-compute the LightGBM
+     <code>fwd_3y</code> decile spread <i>within</i> each tier.</p>
+  {ctx['price_strat_html']}
+  <p><b>Interpretation.</b> The decile spread is <b>{ctx['lo_spread']*100:+.2f}%</b> for
+     sub-$200K homes, <b>{ctx['mid_spread']*100:+.2f}%</b> in the $200K&ndash;$500K middle,
+     and <b>{ctx['hi_spread']*100:+.2f}%</b> for $500K+ homes &mdash; all positive, all
+     out-of-sample. The two cheaper tiers carry essentially the same spread, and the $500K+
+     tier roughly halves but stays positive. This is the pattern you'd expect if the model
+     has real cross-sectional signal at every price point and luxury markets simply have
+     flatter forward returns &mdash; not the pattern you'd expect if the model were secretly
+     a price-mean-reversion proxy.</p>
+
+  <h2 id='caveats'>Caveats and what's not in this run</h2>
+  <ul>
+    <li><b>HMDA mortgage records are in the feature store but didn't reach the trained
+        model.</b> Tract-year origination counts + institutional-share are loaded at ~12%
+        panel coverage, but the data only spans 2020 / 2022 / 2023. The post-2012 split's
+        train window ends at 2017-12 &mdash; entirely pre-HMDA &mdash; so prep's coverage
+        filter drops every HMDA column from X.</li>
+    <li><b>Four data sources still pending.</b> FCC broadband, NOAA VIIRS satellite
+        nightlights, Foursquare POIs, and FBI NIBRS crime aggregates (needs
+        <code>CDE_API_KEY</code>) are wired into the assembler but blocked on credentials.</li>
+    <li><b>Owner-occupier overlay is geographically narrow.</b> {escape(ctx['owner_occ_concentration'])}
+        because the filter chain collapses to wealthy suburbs of one dominant metro.</li>
+    <li><b>Total-return modeling now done but on a smaller universe.</b> ZORI rent index
+        covers only ~11% of zip-months, so <code>fwd_3y_total</code> trains on ~215K rows vs
+        ~1.98M for price-only.</li>
+    <li><b>ElasticNet regressed under the new QuantileTransformer scaling.</b> The Wave-1 fix
+        solved an RMSE blowup but flipped fwd_3y Spearman to negative. LightGBM is unaffected
+        and remains the headline model.</li>
+    <li><b>Pre-2008 coverage is thin.</b> Realtor inventory (2016+), QCEW (2010+), ACS
+        (2013+), BPS (2011+), IRS-SOI (2011+) all start post-GFC. The pre_2008 results in
+        the headline table train on 27 features vs 41 post-2012.</li>
+    <li><b>fwd_5y walk-forward CV has 3 folds, not 5</b> &mdash; the 2021-12 and 2022-12
+        cutoffs would need fwd_5y observability through 2026-12 / 2027-12, beyond the
+        panel's end.</li>
+  </ul>
+
+  <div class='cross-page'>
+    <b>Back to the results?</b> &rarr; <a href='index.html'>Where to buy, overlay shortlists,
+    macro context, alternative ranking, and the headline summary table</a>.
+  </div>
+
+  <p class='footnote'>arbok &middot; model-first, personal-overlay layered on top &middot;
+     all data free / public sources &middot; code at <code>src/arbok/</code></p>
+"""
+
+    minutes = _reading_time(body_inner)
+    body_inner = body_inner.replace(
+        f"arbok study &middot; generated {BUILD_DATE} &middot; all data from free / public sources",
+        f"~{minutes} min read &middot; generated {BUILD_DATE} &middot; all data from free / public sources",
+        1,
+    )
+
+    return f"""{_html_head(PAGE_TITLE_BASE + " — methodology")}
+<body>
+  <noscript>
+    <div class='nojs-banner'>
+      <b>Interactive charts require JavaScript.</b> The data tables and the
+      written analysis in each section will still render without it; the
+      hover-tooltips, sortable columns, and Plotly visualisations will not.
+    </div>
+  </noscript>
+  <div class='layout'>
+  {toc_sidebar}
+  <article>
+{body_inner}
+  </article>
+  </div>
+{PAGE_SCRIPTS}
+</body>
+</html>
+"""
+
+
+def _rewrite_overlay_headings(html: str) -> str:
+    """The overlay artifact still emits '9 ·' / '9a ·' / '9b ·' / '9c ·' headings.
+    Rewrite to fit the new index-page numbering (Section 2)."""
+    import re
+    if not html:
+        return html
+    # Replace top-level "9 · Personal-overlay shortlists ..." with no number (the
+    # parent h2 on the page already carries the section heading).
+    html = re.sub(
+        r"<h2>9\s*[·‧.:\-]\s*Personal-overlay shortlists[^<]*</h2>",
+        "",
+        html,
+    )
+    # Renumber 9a → 2a, 9b → 2b, 9c → 2c.
+    html = re.sub(r"(<h3>)9([abc])\s*[·‧.:\-]\s*", r"\g<1>2\g<2>. ", html)
+    return html
+
+
 def main() -> None:
+    """Compute all data once; render index.html + methods.html."""
     print("Building charts…")
     decile = chart_decile_spread()
     shap_figs = [chart_shap_for(h) for h in HORIZONS]
-    leaderboard_html = chart_city_leaderboard_top_n(30)
-    zip_leaderboard_html = chart_leaderboard_top_n(20)
+    leaderboard_html_raw = chart_city_leaderboard_top_n(30)
+    zip_leaderboard_html_raw = chart_leaderboard_top_n(20)
+    total_leaderboard_html_raw = chart_total_leaderboard_top_n(n=30)
+    # Inject the `sortable` class on all three leaderboard tables.
+    def _make_sortable(s: str) -> str:
+        return s.replace("<table class='leaderboard'>",
+                          "<table class='leaderboard sortable'>", 1)
+    leaderboard_html = _make_sortable(leaderboard_html_raw)
+    zip_leaderboard_html = _make_sortable(zip_leaderboard_html_raw)
+    total_leaderboard_html = _make_sortable(total_leaderboard_html_raw)
+
     headline_html = chart_headline_table()
     price_strat_html = chart_price_stratification_table()
-    # Also compute the price-stratification numbers once more for the
-    # interpretation paragraph below the table.
+
     strat_df = price_stratified_decile_spread()
     strat_lookup = {r["tier"]: r["spread"] for _, r in strat_df.iterrows()}
     lo_spread = strat_lookup.get("<$200K", float("nan"))
     mid_spread = strat_lookup.get("$200K–$500K", float("nan"))
     hi_spread = strat_lookup.get("$500K+", float("nan"))
 
-    # Walk-forward CV table + per-horizon stats for inline copy
     walkforward_html = chart_walkforward_table()
     if WALKFORWARD is not None:
         sub_wf = WALKFORWARD[
@@ -1325,21 +2347,17 @@ def main() -> None:
         wf_summary = _summarize_cv(sub_wf).set_index("horizon")
         wf3_mean = float(wf_summary.loc["fwd_3y", "mean_spearman"]) if "fwd_3y" in wf_summary.index else float("nan")
         wf3_std = float(wf_summary.loc["fwd_3y", "std_spearman"]) if "fwd_3y" in wf_summary.index else float("nan")
-        wf3_lo = float(wf_summary.loc["fwd_3y", "q025_spearman"]) if "fwd_3y" in wf_summary.index else float("nan")
-        wf3_hi = float(wf_summary.loc["fwd_3y", "q975_spearman"]) if "fwd_3y" in wf_summary.index else float("nan")
         wf3_n = int(wf_summary.loc["fwd_3y", "n_folds"]) if "fwd_3y" in wf_summary.index else 0
     else:
-        wf3_mean = wf3_std = wf3_lo = wf3_hi = float("nan")
+        wf3_mean = wf3_std = float("nan")
         wf3_n = 0
 
-    # Spatial CV: raw vs demeaned tables
     spatial_raw_html, spatial_dem_html, spatial_quotes = chart_spatialcv_tables()
     sp_raw_sp = spatial_quotes.get("raw_spearman", float("nan"))
     sp_dem_sp = spatial_quotes.get("dem_spearman", float("nan"))
     sp_raw_spread = spatial_quotes.get("raw_spread", float("nan"))
     sp_dem_spread = spatial_quotes.get("dem_spread", float("nan"))
 
-    # Headline fwd_3y post_2012 numbers (best model decile spread + top/bot decile)
     post3 = (
         RESULTS[(RESULTS["split"] == "post_2012") & (RESULTS["horizon"] == "fwd_3y")]
         .sort_values("decile_spread", ascending=False)
@@ -1352,30 +2370,23 @@ def main() -> None:
     else:
         hd_spread = hd_top = hd_bot = float("nan")
 
-    # Headline fwd_3y post_2012 LightGBM Spearman — used in section 1a copy for the
-    # "did walk-forward survive the static result?" comparison.
     lgbm3 = RESULTS[
         (RESULTS["split"] == "post_2012") & (RESULTS["horizon"] == "fwd_3y")
         & (RESULTS["model"] == "lightgbm")
     ]
     static_fwd3y_spearman = float(lgbm3["spearman"].iloc[0]) if not lgbm3.empty else float("nan")
 
-    # Leaderboard band width stats
     band = leaderboard_band_stats()
     band_p10 = band["median_p10"] * 100
     band_p90 = band["median_p90"] * 100
     band_width = band["median_band"] * 100
 
-    # Map embed — iframe to the self-contained Folium HTML so we don't balloon report.html
-    # to 8 MB by inlining the Leaflet bundle.
     map_path = PROCESSED / "zip_decile_map.html"
     if map_path.exists():
-        # Cache-bust both the link and the iframe so GitHub Pages' CDN doesn't
-        # serve stale map HTML to returning visitors on a new build day.
         map_link_html = (
             "<p>Hover any zip for ZIP code, metro, ZHVI, predicted fwd_3y return, and decile rank. "
             "Drag to pan; scroll to zoom. "
-            f"<a href='zip_decile_map.html?v={BUILD_DATE}' target='_blank'>Open the map full-screen ↗</a></p>"
+            f"<a href='zip_decile_map.html?v={BUILD_DATE}' target='_blank'>Open the map full-screen &#x2197;</a></p>"
             f"<iframe src='zip_decile_map.html?v={BUILD_DATE}' "
             "style='width:100%; height:600px; border:1px solid #ccc; border-radius:4px;' "
             "loading='lazy' title='ZIP decile map'></iframe>"
@@ -1383,7 +2394,9 @@ def main() -> None:
     else:
         map_link_html = "<p class='caveat'>(Map render pending.)</p>"
 
-    # Backtest: time-series chart + summary table + headline stats for TL;DR
+    # Backtest charts/tables: include_js is False — both pages' first chart
+    # (forward-return-illustration on methods, timing-chart on index) will be
+    # the inlining anchor for that page's Plotly bundle.
     backtest_chart_fig = chart_backtest_chart()
     backtest_chart_html = _div(
         backtest_chart_fig, include_js=False,
@@ -1399,22 +2412,20 @@ def main() -> None:
     bt_total_excess = bt["total"]["excess"]
     bt_total_spread = bt["total"]["spread"]
 
-    # Total-return alternative leaderboard
-    total_leaderboard_html = chart_total_leaderboard_top_n(n=30)
-
-    # Personal-overlay fragment (section 8)
     overlay_section_html = OVERLAY_HTML if OVERLAY_HTML else "<p><i>Personal overlay not yet built.</i></p>"
     owner_occ_concentration = owner_occupier_concentration_stat()
 
-    # --- 5b · Macro context ------------------------------------------------
+    # Macro context: timing chart sits on index — so the timing chart is the
+    # first Plotly chart there and carries include_js=True. Methods page's
+    # first Plotly chart is the fwd_illus_fig.
     timing_fig = chart_timing_universe_mean()
     if timing_fig is not None:
         timing_chart_html = _div(
-            timing_fig, include_js=False,
+            timing_fig, include_js=True,
             aria_label="Time series line chart: universe-mean predicted fwd_3y vs subsequent realized fwd_3y, post-2012 LightGBM",
         )
     else:
-        timing_chart_html = ("<p class='caveat'>Timing chart not built yet — "
+        timing_chart_html = ("<p class='caveat'>Timing chart not built yet &mdash; "
                              "run <code>python scripts/macro_context.py</code>.</p>")
     timing_stats = timing_summary_stats()
     if timing_stats:
@@ -1440,25 +2451,17 @@ def main() -> None:
     hedge_hist_html = hedge_historical_table()
     hedge_trail_html = hedge_trailing_table()
     hedge_fig = chart_hedge_comparison()
-    if hedge_fig is not None:
-        hedge_chart_html = _div(
-            hedge_fig, include_js=False,
-            aria_label="Log-scale cumulative real return per asset since 2000: residential RE vs S&P 500, gold, REITs, and Bitcoin",
-        )
-    else:
-        hedge_chart_html = ("<p class='caveat'>Hedge chart not built yet — "
-                            "run <code>python scripts/macro_context.py</code>.</p>")
+    hedge_chart_html = _div(
+        hedge_fig, include_js=False,
+        aria_label="Log-scale cumulative real return per asset since 2000: residential RE vs S&P 500, gold, REITs, and Bitcoin",
+    ) if hedge_fig is not None else "<p class='caveat'>Hedge chart not built yet.</p>"
     hedge_summary = hedge_summary_for_copy()
     hedge_winner_3y_median = (
         hedge_summary["medians"][0] if hedge_summary.get("medians") else ("n/a", float("nan"))
     )
-    hedge_loser_3y_median = (
-        hedge_summary["medians"][-1] if hedge_summary.get("medians") else ("n/a", float("nan"))
-    )
     hedge_winner_trailing = (
         hedge_summary["trailing"][0] if hedge_summary.get("trailing") else ("n/a", float("nan"))
     )
-    # Find ZHVI's rank for the body copy.
     if hedge_summary.get("medians"):
         labels = [a for a, _ in hedge_summary["medians"]]
         zhvi_label = HEDGE_LABELS.get("RE_ZHVI_top100", "RE_ZHVI_top100")
@@ -1473,54 +2476,53 @@ def main() -> None:
         zhvi_3y_median = float("nan")
     n_assets = len(hedge_summary.get("medians", [])) or 0
 
-    # --- Extra explanatory visuals -----------------------------------------
-    # NOTE: fwd_illus is the FIRST Plotly chart rendered in the body, so it
-    # carries the inlined Plotly.js bundle (~3 MB). All other _div() calls in
-    # this report set include_js=False and share that bundle. Inlining (rather
-    # than CDN) makes the report robust to CDN outages / network filters at the
-    # cost of file size; if size becomes a problem the fallback is to flip
-    # include_js=True back to 'cdn' here and add a noscript CDN-failure warning.
-    # `js_inlined` tracks whether some earlier _div() has already shipped the
-    # Plotly bundle; if fwd_illus_fig falls through to the placeholder text,
-    # the next chart (decile, section 3) picks up the responsibility.
-    js_inlined = False
+    # Methods-page explanatory visuals.
     print("  · forward-return illustration")
     fwd_illus_fig = chart_forward_return_illustration()
+    # fwd_illus is the FIRST Plotly chart on methods.html — inline the bundle.
     if fwd_illus_fig is not None:
         fwd_illus_html = _div(
             fwd_illus_fig, include_js=True,
             aria_label="Illustrative ZIP ZHVI line chart with shaded fwd_1y, fwd_3y, and fwd_5y forward windows from a single anchor date",
         )
-        js_inlined = True
+        methods_js_inlined = True
     else:
-        fwd_illus_html = "<p class='caveat'>Forward-return illustration unavailable (no ZIP with enough history).</p>"
+        fwd_illus_html = "<p class='caveat'>Forward-return illustration unavailable.</p>"
+        methods_js_inlined = False
+
     print("  · walk-forward schematic")
     wf_schematic_html = _div(
-        chart_walkforward_schematic(), include_js=False,
-        aria_label="Schematic of walk-forward cross-validation: five folds with sliding train and one-year test windows",
+        chart_walkforward_schematic(), include_js=not methods_js_inlined,
+        aria_label="Schematic of walk-forward cross-validation",
     )
+    methods_js_inlined = True
+
     print("  · spatial-CV fold matrix")
     sp_fold_fig = chart_spatial_fold_matrix()
     sp_fold_html = _div(
         sp_fold_fig, include_js=False,
-        aria_label="Scatter of top-100 CBSAs colored by spatial-CV fold assignment; bubble size encodes metro population",
+        aria_label="Scatter of top-100 CBSAs colored by spatial-CV fold assignment",
     ) if sp_fold_fig is not None else ""
+
     print("  · equity curve")
     eq_curve_fig = chart_equity_curve()
     eq_curve_html = _div(
         eq_curve_fig, include_js=False,
         aria_label="Per-cohort terminal wealth from $1 invested in the top-decile basket, universe, and bottom-decile basket held for 3 years",
     ) if eq_curve_fig is not None else ""
+
     print("  · calibration scatter")
     calib_html = _div(
         chart_calibration_scatter(), include_js=False,
-        aria_label="Calibration scatter: mean predicted fwd_3y vs mean realized fwd_3y across 20 quantile bins on the post-2012 test set",
+        aria_label="Calibration scatter: mean predicted vs realized fwd_3y across 20 quantile bins",
     )
+
     print("  · decile curve")
     decile_curve_html = _div(
         chart_decile_curve(), include_js=False,
-        aria_label="Realized fwd_3y annualized return by predicted decile, post-2012 LightGBM",
+        aria_label="Realized fwd_3y annualized return by predicted decile",
     )
+
     print("  · SHAP waterfalls (top + bot example ZIPs)")
     shap_top_fig, shap_bot_fig = chart_shap_waterfall()
     shap_top_html = _div(
@@ -1531,680 +2533,112 @@ def main() -> None:
         shap_bot_fig, include_js=False,
         aria_label="SHAP waterfall chart for the lowest-predicted ZIP at the latest scoring month",
     ) if shap_bot_fig is not None else ""
-    print("  · quantile fan")
+
+    # decile + SHAP figures for methods.
+    decile_html = _div(
+        decile, include_js=False,
+        aria_label="Decile-spread bar chart by horizon and split, grouped by model",
+    )
+    shap_1y_html = _div(
+        shap_figs[0], include_js=False,
+        aria_label="Top-15 SHAP feature importance bar chart for fwd_1y at the post_2012 split",
+    )
+    shap_3y_html = _div(
+        shap_figs[1], include_js=False,
+        aria_label="Top-15 SHAP feature importance bar chart for fwd_3y at the post_2012 split",
+    )
+    shap_5y_html = _div(
+        shap_figs[2], include_js=False,
+        aria_label="Top-15 SHAP feature importance bar chart for fwd_5y at the post_2012 split",
+    )
+
+    # Quantile fan: appears in index (after timing chart) — include_js=False
+    # because timing_chart_html already inlined.
     fan_fig = chart_quantile_fan()
     fan_html = _div(
         fan_fig, include_js=False,
         aria_label="Universe-mean fwd_3y median forecast with 80% prediction band from quantile LightGBM models",
     ) if fan_fig is not None else ""
 
-    page_title = "arbok — what predicts US residential real-estate returns?"
-    og_description = (
-        "A quant study of what predicts US residential real-estate returns: "
-        "3.73M-row zip-month panel, 140+ free public predictors across 11 "
-        "thematic classes, LightGBM + SHAP attribution, backtested 2018-2021."
-    )[:200]
+    ctx = dict(
+        # Headline / decile-spread block
+        hd_spread=hd_spread, hd_top=hd_top, hd_bot=hd_bot,
+        static_fwd3y_spearman=static_fwd3y_spearman,
+        headline_html=headline_html,
+        decile_html=decile_html,
+        decile_curve_html=decile_curve_html,
+        # Backtest
+        bt_price_hit=bt_price_hit, bt_price_excess=bt_price_excess,
+        bt_price_spread=bt_price_spread, bt_price_n=bt_price_n,
+        bt_total_hit=bt_total_hit, bt_total_excess=bt_total_excess,
+        bt_total_spread=bt_total_spread,
+        backtest_chart_html=backtest_chart_html,
+        backtest_table_html=backtest_table_html,
+        eq_curve_html=eq_curve_html,
+        calib_html=calib_html,
+        # CV
+        wf3_mean=wf3_mean, wf3_std=wf3_std, wf3_n=wf3_n,
+        walkforward_html=walkforward_html,
+        wf_schematic_html=wf_schematic_html,
+        sp_raw_sp=sp_raw_sp, sp_dem_sp=sp_dem_sp,
+        sp_raw_spread=sp_raw_spread, sp_dem_spread=sp_dem_spread,
+        spatial_raw_html=spatial_raw_html,
+        spatial_dem_html=spatial_dem_html,
+        sp_fold_html=sp_fold_html,
+        # SHAP
+        shap_1y_html=shap_1y_html,
+        shap_3y_html=shap_3y_html,
+        shap_5y_html=shap_5y_html,
+        shap_top_html=shap_top_html,
+        shap_bot_html=shap_bot_html,
+        # Stratification
+        lo_spread=lo_spread, mid_spread=mid_spread, hi_spread=hi_spread,
+        price_strat_html=price_strat_html,
+        # Leaderboards
+        leaderboard_html=leaderboard_html,
+        zip_leaderboard_html=zip_leaderboard_html,
+        total_leaderboard_html=total_leaderboard_html,
+        # Bands
+        band_p10=band_p10, band_p90=band_p90, band_width=band_width,
+        # Map
+        map_link_html=map_link_html,
+        # Overlay
+        overlay_section_html=overlay_section_html,
+        owner_occ_concentration=owner_occ_concentration,
+        # Macro context
+        timing_chart_html=timing_chart_html,
+        fan_html=fan_html,
+        ts_current=ts_current, ts_month=ts_month, ts_p10=ts_p10, ts_p90=ts_p90,
+        ts_med=ts_med, ts_q25=ts_q25, ts_q75=ts_q75, ts_pct=ts_pct,
+        ts_verdict=ts_verdict, ts_n_zips=ts_n_zips, ts_n_hist=ts_n_hist,
+        # Hedges
+        hedge_hist_html=hedge_hist_html,
+        hedge_trail_html=hedge_trail_html,
+        hedge_chart_html=hedge_chart_html,
+        hedge_winner_3y_median=hedge_winner_3y_median,
+        hedge_winner_trailing=hedge_winner_trailing,
+        zhvi_rank=zhvi_rank, zhvi_3y_median=zhvi_3y_median, n_assets=n_assets,
+        # Methods-only
+        fwd_illus_html=fwd_illus_html,
+    )
 
-    html = f"""<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='utf-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <title>{escape(page_title)}</title>
-  <link rel='icon' href='assets/favicon.svg?v={BUILD_DATE}' type='image/svg+xml'>
-  <meta name='description' content="{escape(og_description)}">
-  <meta property='og:type' content='article'>
-  <meta property='og:title' content="{escape(page_title)}">
-  <meta property='og:description' content="{escape(og_description)}">
-  <meta property='og:image' content='assets/og-image.png?v={BUILD_DATE}'>
-  <meta property='og:url' content='{escape(SITE_URL)}'>
-  <meta name='twitter:card' content='summary_large_image'>
-  <meta name='twitter:title' content="{escape(page_title)}">
-  <meta name='twitter:description' content="{escape(og_description)}">
-  <meta name='twitter:image' content='assets/og-image.png?v={BUILD_DATE}'>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
-            max-width: 1100px; margin: 2em auto; color: #1a1a1a; padding: 0 1em;
-            line-height: 1.55; }}
-    h1 {{ border-bottom: 2px solid #1a1a1a; padding-bottom: .3em; margin-bottom: .2em; }}
-    h2 {{ margin-top: 2.2em; color: #2c5282; padding-bottom: .2em;
-          border-bottom: 1px solid #e0e6ef; }}
-    h3 {{ color: #2c5282; margin-top: 1.8em; }}
-    p {{ margin: .8em 0; }}
-    table {{ border-collapse: collapse; margin: 1em 0; }}
-    th, td {{ padding: .35em .8em; border-bottom: 1px solid #ddd; text-align: left;
-              font-size: .92em; }}
-    th {{ background: #f3f5f9; }}
-    table.headline td:nth-child(4) {{ font-weight: bold; color: #2c5282; }}
-    table.headline tr.split-header td {{ background: #eef2f8; font-weight: 600;
-                                          color: #2c5282; font-size: .85em;
-                                          text-transform: uppercase; letter-spacing: .04em;
-                                          padding-top: .55em; }}
-    table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace;
-                         font-size: .82em; }}
-    table.leaderboard td:nth-child(6) {{ font-weight: bold; color: #2c5282; }}
-    /* Tooltips: keep the dotted-underline affordance, but also make the title
-       text discoverable on touch / keyboard via a focusable wrapper. The
-       inline <span title='...'> elements emitted by _humanize_drivers() are
-       turned into <span tabindex='0' class='tt'> with the description in a
-       sibling .tt-body — see _humanize_drivers below. */
-    table.leaderboard span.tt {{ position: relative; border-bottom: 1px dotted #999;
-                                 cursor: help; outline: none; }}
-    table.leaderboard span.tt .tt-body {{
-        display: none; position: absolute; left: 0; top: 1.4em; z-index: 30;
-        background: #1a1a1a; color: #fff; padding: .45em .65em;
-        border-radius: 4px; font-size: .82em; line-height: 1.35;
-        max-width: 22em; white-space: normal;
-        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-        box-shadow: 0 2px 6px rgba(0,0,0,.25);
-    }}
-    /* Hover (mouse), focus (keyboard), focus-within (taps that activate
-       the wrapper) — any one of them reveals the tooltip body. */
-    table.leaderboard span.tt:hover .tt-body,
-    table.leaderboard span.tt:focus .tt-body,
-    table.leaderboard span.tt:focus-within .tt-body {{ display: block; }}
-    .meta {{ color: #666; font-size: .9em; margin-bottom: 1.8em; }}
-    .summary {{ background: #f3f5f9; border-left: 4px solid #2c5282;
-                padding: 1em 1.4em; margin: 1.5em 0; border-radius: 0 4px 4px 0; }}
-    .summary h3 {{ margin-top: 0; color: #2c5282; }}
-    .primer {{ background: #f8f9fb; border: 1px solid #e0e6ef;
-               padding: 1em 1.4em; margin: 1.5em 0; border-radius: 4px;
-               font-size: .94em; }}
-    .primer h3 {{ margin-top: 0; color: #2c5282; }}
-    .primer dt {{ font-weight: 600; margin-top: .55em; }}
-    .primer dd {{ margin: 0 0 .2em 0; }}
-    .caveat {{ background: #fff8e6; border-left: 4px solid #c9a227;
-               padding: .9em 1.2em; margin: 1.2em 0; font-size: .93em;
-               border-radius: 0 4px 4px 0; }}
-    code {{ background: #f3f5f9; padding: 1px 5px; border-radius: 3px;
-            font-size: .9em; }}
-    .footnote {{ color: #666; font-size: .85em; margin-top: 3em;
-                 border-top: 1px solid #eee; padding-top: 1em; }}
-    .nojs-banner {{ background: #fff8e6; border-left: 4px solid #c9a227;
-                    padding: .9em 1.2em; margin: 1em 0; font-size: .93em;
-                    border-radius: 0 4px 4px 0; }}
-    ul {{ margin: .4em 0; }}
-    li {{ margin: .2em 0; }}
-    /* Make wrapped tables look unchanged on desktop but scroll horizontally
-       on narrow screens instead of busting the page width. */
-    div[style*='overflow-x:auto'] {{ -webkit-overflow-scrolling: touch; }}
-  </style>
-</head>
-<body>
-  <noscript>
-    <div class='nojs-banner'>
-      <b>Interactive charts require JavaScript.</b> The data tables and the
-      written analysis in each section will still render without it; the
-      hover-tooltips and Plotly visualisations will not.
-    </div>
-  </noscript>
-  <h1>What predicts US residential real-estate returns?</h1>
-  <p class='meta'>arbok study · generated {BUILD_DATE} · all data from free / public sources</p>
+    # Render both pages.
+    index_html = _build_index_html(ctx)
+    methods_html = _build_methods_html(ctx)
 
-  <div class='summary'>
-    <h3>Executive summary</h3>
-    <ul>
-      <li>Built a 3.73-million-row panel of every zip code in the top 100 US metros, monthly, 2000-2026,
-          joined with 140+ candidate predictors organized into 11 thematic classes (macro, demographics,
-          climate, supply, healthcare, schools, politics, affordability, amenities, etc.).</li>
-      <li>Trained gradient-boosted models to predict 1-, 3-, and 5-year forward home-price returns
-          per zip on two backtest windows: pre-2008 (GFC stress test) and post-2012 (rate-shock + COVID).</li>
-      <li><b>Best signal:</b> 3-year horizon, post-2012 split. Top decile averaged
-          <b>{hd_top:+.2f}%</b> realized returns vs. bottom decile <b>{hd_bot:+.2f}%</b> —
-          a {hd_spread:+.2f} pt spread out of sample.</li>
-      <li><b>The model works in backtest.</b> Replaying the strategy month-by-month from 2018-01
-          through 2021-12 ({bt_price_n} basket-formation months × 3y hold), the model's top-decile
-          zip basket beat the equal-weight universe in <b>{bt_price_hit:.1f}%</b> of months,
-          earning roughly <b>+{bt_price_excess:.2f} pp/yr</b> alpha. The yield-aware variant beat
-          the universe in <b>{bt_total_hit:.1f}%</b> of months at <b>+{bt_total_excess:.2f} pp/yr</b>
-          on a (smaller) yield-observable universe.</li>
-      <li><b>But is now a good time to buy?</b> The model's predicted universe-mean fwd_3y at
-          {ts_month} is <b>{ts_current*100:+.2f}%</b> — that sits at the
-          <b>{ts_pct:.0f}th percentile</b> of the post-2012 history (median +{ts_med*100:.2f}%).
-          Verdict: <b>{ts_verdict}</b> vs historical baseline. The model is saying "wait, or pick
-          carefully" rather than "buy the index". See section 6.</li>
-      <li><b>Real estate vs other inflation hedges (median 3y real return, 2000-now, unlevered):</b>
-          Bitcoin and gold lead (+10% to +66% depending on selection bias); broad equity and REITs
-          mid-pack; <b>US residential RE comes last at ~+3.5%</b>. Trailing 3 years through {ts_month}
-          puts ZHVI top-100 at <b>{hedge_summary['zhvi_trailing']*100:+.2f}%</b> real, worst in the
-          cohort. Caveat: ZHVI is unlevered and ignores rent — net of leverage + carry, real estate
-          looks better; but it's not the runaway hedge folk wisdom claims.</li>
-      <li><b>Robustness check.</b> Walk-forward CV across {wf3_n} rolling 12-month test
-          windows gives fwd_3y Spearman ρ = <b>{wf3_mean:+.3f} ± {wf3_std:.3f}</b>. Spatial CV
-          (hold out whole CBSAs, train+test ≤ 2017-12) on the <i>within-metro residual</i>
-          gives Spearman ρ = <b>{sp_dem_sp:+.3f}</b> — the genuine cross-sectional alpha after
-          stripping out the "expensive zips stay expensive" level effect.</li>
-      <li><b>The signal survives price stratification.</b> Decile spreads of
-          <b>{lo_spread*100:+.2f}%</b> / <b>{mid_spread*100:+.2f}%</b> / <b>{hi_spread*100:+.2f}%</b>
-          for &lt;$200K / $200K–$500K / $500K+ tiers — the model isn't merely buying cheap homes.</li>
-      <li><b>Real rates dominate medium/long; mean-reversion dominates short.</b> At fwd_3y, 10Y TIPS
-          yield's mean-abs SHAP is more than 4× the next feature. At fwd_1y, drawdown from the trailing
-          60-month ZHVI peak is #1 — zips that have fallen most snap back hardest.</li>
-      <li><b>Newer-source surprises:</b> county Republican vote share (MIT Election Lab) is in the top
-          10 for <i>every</i> horizon; Wikipedia metro-article pageviews is #3 at fwd_3y. Identity and
-          attention proxies — not in textbook real-estate models.</li>
-      <li><b>Climate has narrowed to a short-horizon signal.</b> FEMA disaster counts + NRI wildfire
-          stay in fwd_1y's top 10 but drop out of fwd_3y and fwd_5y under the new feature pool.</li>
-    </ul>
-  </div>
+    out_index = PROCESSED / "index.html"
+    out_methods = PROCESSED / "methods.html"
+    out_index.write_text(index_html)
+    out_methods.write_text(methods_html)
+    print(f"Wrote {out_index}  ({out_index.stat().st_size/1024:.1f} KB)")
+    print(f"Wrote {out_methods}  ({out_methods.stat().st_size/1024:.1f} KB)")
 
-  <div class='primer'>
-    <h3>How to read this report (a 60-second primer)</h3>
-    <p>This report uses some specialized terms repeatedly. The shortest possible definitions:</p>
-    <dl>
-      <dt>ZIP / metro (CBSA)</dt>
-      <dd>A ZIP code is a USPS postal area (~22,000 across the US). A "metro" — Census's Core-Based
-          Statistical Area or <b>CBSA</b> — is a grouping of nearby ZIPs that share a labor market
-          (e.g., the "Washington, DC metro" spans into Virginia and Maryland suburbs). We restrict
-          to the top 100 metros by population.</dd>
-      <dt>Forward return (fwd_1y, fwd_3y, fwd_5y)</dt>
-      <dd>"fwd_3y" is the price change of a typical home in a ZIP over the next 3 years,
-          annualized to a yearly rate. The model predicts these forward returns using only
-          information available <i>at the start</i> of the holding period — no peeking ahead.</dd>
-      <dt>ZHVI / ZORI</dt>
-      <dd>Zillow's monthly Home Value Index (the price level we predict) and Observed Rent Index
-          (used in the yield-aware variant of the model).</dd>
-      <dt>LightGBM, ElasticNet, "hedonic"</dt>
-      <dd>Three models we train and compare. <b>LightGBM</b> is a gradient-boosted decision-tree
-          model — the standard machine-learning workhorse for tabular data; it captures non-linear
-          patterns and feature interactions. <b>ElasticNet</b> is a regularized linear regression
-          — interpretable but less flexible. <b>Hedonic</b> is the textbook real-estate-economics
-          method: a regression using just demographic features (Census ACS basics). LightGBM is the
-          headline model; the other two are baselines a real model has to beat.</dd>
-      <dt>SHAP</dt>
-      <dd>For each prediction, SHAP attributes a contribution to every input feature ("this ZIP
-          scored high because real interest rates pushed it down by X and ACS demographics pushed
-          it up by Y"). Top-SHAP features tell us what the model relies on most.</dd>
-      <dt>Spearman ρ (rho)</dt>
-      <dd>A rank correlation: did the model order ZIPs correctly from worst-to-best forward return?
-          +1 = perfect ordering, 0 = random, −1 = perfectly backwards. +0.3 is meaningful for noisy
-          financial data.</dd>
-      <dt>Decile spread</dt>
-      <dd>The realized return of the 10% of ZIPs the model ranked highest, minus the 10% it ranked
-          lowest. The bottom-line "would picking this model's top zips have helped?" number.</dd>
-      <dt>Backtest</dt>
-      <dd>Replay history. At each past month, we run the model on data available <i>then</i>,
-          take its top-decile picks, and check what those ZIPs actually returned 3 years later.
-          The most honest evaluation of "did this work in practice?".</dd>
-      <dt>Walk-forward CV, spatial CV</dt>
-      <dd>Two ways of stress-testing the model beyond a single train/test split. <b>Walk-forward</b>
-          slides the training cutoff year-by-year so we get a range of out-of-sample numbers rather
-          than one experiment. <b>Spatial</b> holds out entire metros (not just months), making sure
-          the model's signal isn't leaking through neighboring ZIPs in the same metro.</dd>
-      <dt>Real rate (10Y TIPS yield)</dt>
-      <dd>The interest rate on inflation-protected Treasury bonds — the "true" cost of capital after
-          inflation. Higher real rates make borrowing more expensive and depress home prices; the
-          single biggest macro driver in the model.</dd>
-      <dt>Drawdown</dt>
-      <dd>How far a ZIP's price index is below its trailing-5-year peak. Drawdown is what the model
-          calls "this ZIP has fallen X% from its recent high" — a clean mean-reversion signal.</dd>
-    </dl>
-  </div>
-
-  <h2>Why this study exists</h2>
-  <p>Residential real estate is the largest asset class most people will ever own, and the conventional
-     wisdom for picking <i>where</i> and <i>when</i> to buy is dominated by qualitative heuristics
-     (school districts, "up-and-coming neighborhoods", proximity to Whole Foods) or single-metric proxies
-     (population growth, median income). This study asks: which of these signals actually predict
-     forward returns, and by how much, separated by time horizon — and are there underweighted predictors
-     that the textbook approach misses?</p>
-
-  <p>The framing is deliberately quantitative. Instead of picking predictors a priori, we cast a wide
-     net (140+ candidates across 11 thematic classes) and let out-of-sample model performance and
-     SHAP attribution tell us what works.</p>
-
-  <h2>The setup in one minute</h2>
-
-  <h3>What we predict</h3>
-  <p>For each zip code at each month, we compute the forward home-price return (Zillow ZHVI index) over
-     three horizons — 1 year, 3 years, 5 years — annualized for the latter two. These are the
-     <i>targets</i> our models try to learn from upstream features.</p>
-  <p>The chart below illustrates what those forward windows look like for a single real ZIP.
-     The diamond marks an example "prediction date"; the three shaded windows are the 1-, 3-, and
-     5-year forward periods we score the model against. <i>Predict-only-on-what-you-knew-at-time-t,
-     score-on-what-actually-happened-by-time-t+h</i> is the discipline that makes the backtest honest.</p>
-  {fwd_illus_html}
-
-  <h3>How we predict it</h3>
-  <p>For each (zip, month) row, we join a wide set of features that were <i>knowable at that time</i>
-     (with explicit publication-lag adjustment per source — e.g., HMDA mortgage data isn't available
-     until 9 months after the year it describes). We then train two families of models per horizon:</p>
-  <ul>
-    <li><b>Baselines:</b> predict the global mean; predict the within-metro mean; OLS regression on
-        Census demographics only ("hedonic"). These are what a real model has to beat to claim it's
-        learning anything.</li>
-    <li><b>Real models:</b> ElasticNet (regularized linear, interpretable) and LightGBM (gradient-boosted
-        trees, captures interactions). Both report Spearman rank correlation and decile spread on
-        out-of-sample test data; LightGBM additionally produces SHAP feature attributions.</li>
-  </ul>
-
-  <h3>How we validate</h3>
-  <p>Two temporal splits, both reported in this run:</p>
-  <ul>
-    <li><b>pre_2008 split:</b> train on data through 2007-12, test on 2008-2013. Stress-tests
-        whether the model breaks across the 2008 housing crisis (the "GFC" — Global Financial Crisis).</li>
-    <li><b>post_2012 split:</b> train through 2017-12, test on 2018-2024. Stress-tests across the
-        Fed's 2022 rate hike cycle (the "rate shock") and the COVID-era demand surge.</li>
-  </ul>
-  <p>This run additionally reports <b>spatial cross-validation</b> (hold out entire CBSAs) and
-     <b>walk-forward CV</b> (rolling 12-month test windows) on top of the two static splits — see
-     section 1 below for the robustness numbers.</p>
-
-  <h3>What's in the feature pool right now</h3>
-  <p>The current feature store covers 22 data sources organized into 11 thematic classes,
-     producing 140+ modeling features after coverage filtering. Hover over any feature name in the
-     SHAP charts below for a one-line description.</p>
-  <ul>
-    <li><b>Macro / rates:</b> 30Y mortgage, 10Y TIPS, M2, Case-Shiller, lumber, US unemployment +
-        their 1/3/12-month deltas (FRED)</li>
-    <li><b>Inventory:</b> months-of-supply, days-on-market, price cuts, active/new/pending
-        listings per zip (Realtor.com)</li>
-    <li><b>Demographics:</b> population by age cohort, household income, education, home value,
-        rent, owner-occupancy at ZCTA (Census ACS, 10 vintages 2013-2022); per-capita personal
-        income at county (BEA)</li>
-    <li><b>Migration:</b> county-to-county AGI flow (IRS SOI)</li>
-    <li><b>Supply:</b> building permits at MSA (Census BPS); business establishments + employment
-        per zip (Census ZBP)</li>
-    <li><b>Jobs:</b> wages + YoY growth at county (BLS QCEW); monthly unemployment rate at county
-        (BLS LAUS)</li>
-    <li><b>Affordability / cost of living:</b> effective property-tax rate per ZCTA (ACS B25103 /
-        B25077); HUD Small-Area Fair Market Rent per ZIP; residential electricity price per state
-        (EIA)</li>
-    <li><b>Healthcare:</b> CMS Hospital Compare star ratings + bed counts by county; County Health
-        Rankings composite + headline measures (life expectancy, premature death, smoking, obesity)</li>
-    <li><b>Schools:</b> NCES district-year enrollment, pupil-teacher ratio, free-lunch share,
-        per-pupil spending — county-broadcast</li>
-    <li><b>Politics:</b> county presidential vote share + winning margin (MIT Election Lab, 2000-2024)</li>
-    <li><b>Climate:</b> trailing-10-year disaster declarations by category (OpenFEMA); flood, wildfire,
-        hurricane, heatwave risk scores at tract (FEMA NRI); annual PM2.5 + ozone air quality
-        (EPA AQS)</li>
-    <li><b>Amenities + infrastructure:</b> EV charging stations per zip (DOE AFDC)</li>
-    <li><b>Behavioral:</b> monthly Wikipedia pageviews per metro article (search-interest proxy)</li>
-    <li><b>Derived (no new data):</b> gross rental yield = 12 × ZORI / ZHVI; rolling 24-mo ZHVI
-        volatility; ZHVI drawdown vs trailing-60-mo peak</li>
-  </ul>
-  <p>Pending modules with code ready but waiting on user-supplied credentials / manual downloads:
-     HMDA (tract-level mortgage records — currently only state-level aggregations), FCC BDC broadband,
-     NOAA VIIRS satellite nightlights, Foursquare POIs (Whole Foods / coffee / breweries),
-     FBI NIBRS county-year crime rates (needs <code>CDE_API_KEY</code>), USAspending federal $ flows.</p>
-
-  <h2>Headline results</h2>
-  <p>The table below picks the best-performing model for each horizon, reported on <b>both</b> temporal
-     splits. The post-2012 block is the main result (larger and more recent test window); the pre-2008
-     block is a stress test through the housing crisis. A signal that shows up in both — same sign, same
-     order-of-magnitude spread — is much harder to dismiss as overfitting to one regime.</p>
-  {headline_html}
-
-  <div class='caveat'>
-    <b>Why R² is not reported as the primary metric:</b> traditional R² is negative on both test windows
-    for nearly every model. This is not a model failure — it's a property of the test windows. Both
-    test periods contain regime shifts (housing crash; rate shock + COVID) where the mean realized return
-    is very different from the training period. Any model that predicts near the training mean gets
-    penalized hard on R². <i>Spatial ranking</i> (Spearman + decile spread) is intact and is what
-    matters for a buy-this-zip-not-that-zip decision.
-  </div>
-
-  <h2>1 · Confidence: walk-forward and spatial robustness</h2>
-  <p>A single train/test split can flatter or punish a model by accident. Two stronger CV regimes
-     re-run the post-2012 LightGBM to bound how much of the headline number is structural vs noise.</p>
-
-  <h3>1a · Walk-forward CV (rolling-origin)</h3>
-  <p>Train through year T−1, test on year T; roll the cutoff from 2018-12 through 2022-12. Five
-     test years per horizon (fewer for fwd_5y, which would need observability beyond the panel's
-     end). The schematic below shows the sliding window: each row is one fold, blue is the training
-     range, green is the held-out test year.</p>
-  {wf_schematic_html}
-  {walkforward_html}
-  <p>For the headline fwd_3y horizon, mean Spearman ρ = <b>{wf3_mean:+.3f}</b> with std
-     <b>{wf3_std:.3f}</b> across {wf3_n} folds — the <b>+{static_fwd3y_spearman:.3f}</b> figure
-     from the single static post-2012 split survives in expectation (the walk-forward average is
-     in fact slightly higher), but with meaningful year-to-year noise. 2020 is the variance driver,
-     as expected.</p>
-
-  <h3>1b · Spatial CV (whole-CBSA holdout)</h3>
-  <p>5-fold CBSA holdout, with train+test both restricted to ≤ 2017-12 so the only stressor is the
-     spatial axis (no temporal regime shift). Two variants: the <b>raw</b> model predicts the price
-     return directly; the <b>demeaned</b> model predicts the within-metro residual — i.e., the model
-     is given each ZIP's return after subtracting the average return of every other ZIP in the same
-     metro that month. That isolates "can the model rank ZIPs <i>inside</i> a metro?" from the easier
-     question "can the model tell expensive metros from cheap ones?".</p>
-  <p>The plot below shows the actual partition: every top-100 metro is assigned to exactly one
-     of five folds (color), and in each fold's evaluation pass only that fold's metros are
-     held out for testing. Bubble size = metro population.</p>
-  {sp_fold_html}
-  <h4>Raw fwd_3y</h4>
-  {spatial_raw_html}
-  <h4>Demeaned (within-metro residual) fwd_3y</h4>
-  {spatial_dem_html}
-  <p><b>The headline lesson.</b> The raw model's Spearman ρ = <b>{sp_raw_sp:+.3f}</b> with decile
-     spread <b>{sp_raw_spread*100:+.2f}%</b> looks spectacular — but most of it is a level effect
-     ("expensive zips stay expensive"). The demeaned model's Spearman ρ = <b>{sp_dem_sp:+.3f}</b>
-     with decile spread <b>{sp_dem_spread*100:+.2f}%</b> is the genuine cross-sectional alpha. Both
-     are meaningful, but the demeaned number is the honest one for "can the model pick the right
-     zip <i>inside</i> a given metro?"</p>
-
-  <h2>2 · Did this actually work? — portfolio backtest</h2>
-  <p>The most decision-relevant question. We replay history: at each month from 2018-01 through
-     2021-12, we run the model with only the data it could have seen at that time, take its
-     top-decile picks (a "basket" of about 1,000 ZIPs), and look up what those ZIPs actually
-     returned 3 years later. Compare to the universe mean (equal-weight all ZIPs — what you'd
-     have gotten if you bought a uniform slice of the country) and to the bottom-decile basket.
-     <b>Alpha</b>, in this context, is the basket's excess annualized return over the universe
-     mean — the "value added" by picking instead of buying everything.</p>
-  {backtest_chart_html}
-  {backtest_table_html}
-  <p><b>The model adds skill.</b> The price-only fwd_3y headline model's top decile beat the
-     universe mean in <b>{bt_price_hit:.1f}%</b> of months ({bt_price_n}/{bt_price_n}), earning
-     roughly <b>+{bt_price_excess:.2f} percentage points per year</b> alpha and a
-     <b>+{bt_price_spread:.2f} pp/yr</b> top-vs-bottom spread. Worst stretch was a handful of
-     trivial misses in mid-2021. The yield-aware <code>fwd_3y_total</code> model is in another
-     class — <b>{bt_total_hit:.1f}%</b> hit rate, <b>+{bt_total_excess:.2f} pp/yr</b> alpha,
-     <b>+{bt_total_spread:.2f} pp/yr</b> top-bot spread — but caveat: its scoring universe is much
-     smaller (only ZIPs where Zillow publishes rent data, ~1.7-2.8K vs ~9.9K). The total-return
-     alpha is real but concentrated in yield-observable metros.</p>
-
-  <h3>2a · Per-cohort wealth: $1 in, $? out after 3 years</h3>
-  <p>The same backtest expressed as terminal wealth. For each entry month, $1 invested in the
-     top-decile basket, the universe, or the bottom-decile basket is compounded forward for the
-     full 3-year hold. Anything above the gray $1 line is a positive real-money outcome for that
-     cohort.</p>
-  {eq_curve_html}
-
-  <h3>2b · Calibration — is the model a good ranker, a good forecaster, or both?</h3>
-  <p>A model can rank ZIPs correctly (high Spearman, healthy decile spread) yet still be
-     mis-calibrated — predicting +3% when realized averages +7%, for instance. We bin every
-     test-set prediction into 20 quantile buckets and plot mean predicted vs mean realized in
-     each bucket. Points on the dashed line are perfectly calibrated; points above the line
-     mean the model was too pessimistic at that prediction level, below means too optimistic.</p>
-  {calib_html}
-  <p>The cloud's <i>slope</i> is the rank quality (steeper = stronger ranking); the cloud's
-     <i>shift</i> relative to the diagonal is the calibration error. A model can have a steep
-     slope but sit far below the diagonal — useful for picking but biased in level. That
-     pattern is exactly what we'd expect in a regime-shift test window like post-2012, and is
-     why R² is not the headline metric here.</p>
-
-  <h2>3 · Decile spread, every model × horizon × split</h2>
-  <p>Each bar is one model on one horizon on one test window. Positive values mean the model's top-decile
-     picks beat its bottom-decile picks; negative values mean it anti-ranked. The left panel is the
-     pre-2008 split (smaller and noisier); the right is post-2012 (the main result).</p>
-  {_div(decile, include_js=(not js_inlined), aria_label="Decile-spread bar chart by horizon (fwd_1y, fwd_3y, fwd_5y) across pre-2008 and post-2012 splits, grouped by model")}
-
-  <h3>3a · Realized return by predicted decile (headline horizon × split)</h3>
-  <p>The chart above collapses each (model, horizon, split) into a single "top minus bottom"
-     number. The one below zooms into the headline (post-2012 LightGBM, fwd_3y) and shows the
-     realized return of <i>every</i> decile, not just the extremes. A monotone climb from
-     decile 1 → decile 10 is the strong-form claim: the model is ordering ZIPs, not just
-     separating the very best from the very worst.</p>
-  {decile_curve_html}
-
-  <p>LightGBM wins decisively on the medium and long horizons in the post-2012 split. On the 1-year
-     horizon, the demographics-only hedonic baseline (a simple linear regression using only Census
-     ACS variables — household income, education, age mix, etc.) actually edges LightGBM. That's a
-     useful sanity check: fancy machine-learning methods aren't always required, and when a simple
-     baseline ties a sophisticated model, the signal probably comes from the data more than the
-     algorithm.</p>
-
-  <h2>4 · What did the model learn? — SHAP feature importance</h2>
-  <p>For each horizon, we compute mean absolute SHAP value per feature on the training sample. SHAP
-     decomposes each prediction into per-feature contributions (positive = pushed the prediction up,
-     negative = down). The bars below show the 15 features that the LightGBM model used most heavily.</p>
-  <h3>Short horizon (1 year)</h3>
-  {_div(shap_figs[0], include_js=False, aria_label="Top-15 SHAP feature importance bar chart for fwd_1y at the post_2012 split")}
-  <h3>Medium horizon (3 years)</h3>
-  {_div(shap_figs[1], include_js=False, aria_label="Top-15 SHAP feature importance bar chart for fwd_3y at the post_2012 split")}
-  <h3>Long horizon (5 years)</h3>
-  {_div(shap_figs[2], include_js=False, aria_label="Top-15 SHAP feature importance bar chart for fwd_5y at the post_2012 split")}
-
-  <h3>4a · Per-ZIP attribution — why this ZIP, not that one?</h3>
-  <p>The aggregate SHAP charts above answer "which features does the model rely on, on average?"
-     The two waterfalls below answer the more decision-relevant version of that question:
-     <i>for this specific ZIP, which features pushed its predicted return up or down, and by
-     how much?</i> Green bars push the prediction higher than the model's base rate; red bars
-     push it lower. The two examples are the highest-predicted and lowest-predicted ZIPs at the
-     most recent scoring month.</p>
-  <h4>Top-decile example</h4>
-  {shap_top_html}
-  <h4>Bottom-decile example</h4>
-  {shap_bot_html}
-  <p>The pattern that recurs across nearly every top-decile ZIP: a large positive contribution from
-     the drawdown feature (this ZIP is depressed relative to its 5-year peak), combined with a
-     uniform negative contribution from the 10Y real rate (rates are elevated for everyone right
-     now). Bottom-decile ZIPs typically show the opposite: little to no drawdown, plus a stack
-     of negative contributions from demographic or migration features.</p>
-
-  <p><b>Four findings worth flagging:</b></p>
-  <ul>
-    <li><b>Drawdown is the #1 short-horizon predictor.</b> The derived "ZHVI drawdown vs trailing
-        60-month peak" feature carries the largest mean-abs SHAP at fwd_1y. Zips that have fallen
-        most relative to their recent peak tend to snap back hardest — a clean cross-sectional
-        mean-reversion signal.</li>
-    <li><b>Real rates dominate medium/long by a wide margin.</b> At fwd_3y, 10Y TIPS yield's
-        mean-abs SHAP is more than 4× the next-largest feature; at fwd_5y, more than 3×. Medium and
-        long-horizon ranking is mostly about macro conditions, not zip-specific properties.</li>
-    <li><b>New political + behavioral features are earning their keep.</b> County Republican vote
-        share (MIT Election Lab) appears in the top 10 for every horizon — and at fwd_5y, both
-        party vote shares appear, so the model is reading the political-identity gradient, not
-        taking sides. Wikipedia metro-article pageviews ranks #3 at fwd_3y. These are
-        "attention/identity" proxies the textbook real-estate playbook doesn't model.</li>
-    <li><b>Climate has receded to a short-horizon signal.</b> FEMA disaster counts and NRI wildfire
-        risk were claimed cross-horizon in an earlier run; under the expanded feature pool (politics,
-        health, schools, rent-affordability) they drop out of the top 10 for both fwd_3y and fwd_5y,
-        while staying in fwd_1y — most likely capturing short-term storm-driven price dynamics.</li>
-  </ul>
-
-  <h2>5 · Does the signal survive price stratification?</h2>
-  <p>A common worry with any model that ranks zip codes is that it has secretly learned a price-level
-     proxy: cheap zips mean-revert upward, expensive zips compound more slowly, and the "alpha" is just
-     a roundabout way of buying low. To check that, we split the post-2012 test set into three ZHVI
-     tiers and re-compute the LightGBM <code>fwd_3y</code> decile spread <i>within</i> each tier. If the
-     spread is healthy in every tier, the model is doing more than sorting on price; if it collapses in
-     the expensive tier, it is mostly a mean-reversion bet.</p>
-  {price_strat_html}
-  <p><b>Interpretation.</b> The decile spread is <b>{lo_spread*100:+.2f}%</b> for sub-$200K homes,
-     <b>{mid_spread*100:+.2f}%</b> in the $200K–$500K middle, and <b>{hi_spread*100:+.2f}%</b> for $500K+
-     homes — all positive, all out-of-sample. The two cheaper tiers carry essentially the same spread
-     (~6 points), and the $500K+ tier roughly halves to ~3 points but stays positive. This is the
-     pattern you'd expect if the model has real cross-sectional signal at every price point and luxury
-     markets simply have flatter forward returns — not the pattern you'd expect if the model were
-     secretly a price-mean-reversion proxy (which would show a strong spread in the cheap tier and
-     collapse near zero in the expensive one).</p>
-
-  <h2>6 · Macro context: is now a good time? And how does RE stack up against other hedges?</h2>
-  <p>Everything up to here is about <i>where</i> to buy. The two questions below are about
-     <i>when</i> and <i>what else</i>: does the model think the broad RE universe is cheap or
-     expensive right now, and how has private-RE actually fared against the other classic
-     inflation hedges (stocks, gold, REITs, BTC, TIPS) when you put them on the same axis?</p>
-
-  <h3>Is now a good time to buy?</h3>
-  <p>For each month from 2014 through the latest in the panel, we score every top-100-metro ZIP
-     with the headline post-2012 LightGBM and take the universe mean of the predicted fwd_3y
-     annualized return. The model's prediction at month <i>t</i> can be compared to the
-     <i>realized</i> universe-mean fwd_3y return three years later (dashed line) for all months
-     where t+3y is observable.</p>
-  {timing_chart_html}
-  <p>The model's current ({ts_month}) universe-mean predicted fwd_3y annualized return is
-     <b>{ts_current*100:+.2f}%</b> (median of the per-ZIP distribution that month;
-     {ts_n_zips:,} ZIPs scored, 80% prediction interval roughly
-     [<b>{ts_p10*100:+.2f}%</b>, <b>{ts_p90*100:+.2f}%</b>]). The historical median across all
-     scored months in the post-2012 panel is <b>{ts_med*100:+.2f}%</b> with an interquartile
-     range of [<b>{ts_q25*100:+.2f}%</b>, <b>{ts_q75*100:+.2f}%</b>]. The current prediction sits
-     at the <b>{ts_pct:.0f}th percentile</b> of history — the model is currently
-     <b>{ts_verdict}</b> vs the historical baseline (n = {ts_n_hist} months scored).</p>
-
-  <div class='caveat'>
-    <b>Read the timing chart carefully.</b> The model was trained on data ≤ 2017-12 with a
-    test window of 2018-01 onward, so anything from 2014-2017 is in-sample (the early part of
-    the predicted line tracks realized very closely because the model has seen those rows).
-    From 2018 forward, the gap between blue (predicted) and green (realized) is honest
-    out-of-sample error. The model under-predicted the 2020-2022 COVID-era surge — a regime
-    the training set didn't cover — and is now predicting near-zero / mildly negative returns
-    because trailing real-rate prints are at decade-plus highs. That is a structural feature
-    of the model, not a forecast of the future.
-  </div>
-
-  <h4>How wide is the model's uncertainty over time?</h4>
-  <p>The point forecast above hides the model's own uncertainty. Three separate LightGBM models
-     trained at the 10th, 50th, and 90th conditional quantiles produce an 80% prediction band
-     around the median. The shaded region below is that band. When the band is narrow, the
-     model is confident; when it widens, it is hedging.</p>
-  {fan_html}
-
-  <h3>Real estate vs other inflation hedges</h3>
-  <p>Real estate is rarely held in isolation in a real portfolio — the question "is now a good
-     time to buy a house" is really "is real estate the best use of the marginal dollar right now".
-     We assemble a small benchmark set of public assets that are commonly framed as <b>inflation
-     hedges</b> (assets people buy when they worry their cash will lose purchasing power) and put
-     them on the same chart, in <b>real</b> terms — meaning after subtracting the rate of inflation
-     (CPI, the government's headline Consumer Price Index) over the same holding period. A 5%
-     nominal return during a year of 3% inflation is a 2% real return.</p>
-  <p>The benchmark set: the S&amp;P 500 and total US stock market (broad equities), publicly-traded
-     <b>REITs</b> (Real Estate Investment Trusts — companies that own large commercial /
-     residential portfolios and trade like stocks), gold, 10-year TIPS, and Bitcoin (despite its
-     short history). All compared to the national Zillow ZHVI top-100-metro average — what we
-     call "residential RE", measured <i>unlevered</i> (no mortgage assumed) and <i>net of nothing</i>
-     (rent income, maintenance, property tax, and transaction costs are all ignored). That makes
-     the comparison conservative for RE since the typical homeowner has both leverage (helps) and
-     carrying costs (hurts) that this benchmark omits.</p>
-
-  <h4>Historical 3y / 5y annualized real returns (rolling, since 2000)</h4>
-  {hedge_hist_html}
-
-  <h4>Trailing 3-year real returns ending the most recent month</h4>
-  {hedge_trail_html}
-
-  <h4>Cumulative real return per asset, 2000-now (log scale)</h4>
-  {hedge_chart_html}
-
-  <p><b>What beat what.</b> Across the full 2000-now history of monthly rolling windows, the
-     median 3-year annualized real return ranking is dominated by Bitcoin
-     (<b>{hedge_winner_3y_median[1]*100:+.1f}%</b>, but on a much shorter history starting 2014
-     and with extreme tail risk in both directions) and then by gold and broad-equity / total-
-     return S&P 500 (mid-to-high single digits in real terms). REITs (IYR / VNQ) sit in the
-     <b>+4-6%</b> range as a public-market RE proxy. The Zillow ZHVI top-100 mean — our
-     private-RE benchmark, <i>before</i> leverage and <i>before</i> rent — comes in at
-     <b>{zhvi_3y_median*100:+.2f}%</b> median 3y real, ranking <b>#{zhvi_rank}/{n_assets}</b>
-     among the assets compared. The trailing-3y leader as of the latest month is
-     <b>{escape(hedge_winner_trailing[0])}</b> at <b>{hedge_winner_trailing[1]*100:+.2f}%</b>
-     real.</p>
-
-  <div class='caveat'>
-    <b>Honest caveats on the hedge comparison:</b>
-    <ul style='margin-top: .4em; margin-bottom: 0;'>
-      <li><b>BTC selection bias.</b> Bitcoin's history starts in 2014 (Yahoo's first month of
-          BTC-USD data), so its rolling-window stats are pulled from a strictly post-GFC,
-          mostly-bull-market regime. The other assets include 2000-2002 and 2008-2009 in their
-          medians; BTC does not.</li>
-      <li><b>REITs are not private RE.</b> IYR/VNQ are leveraged, mark-to-market, and earn
-          public-market liquidity discounts/premia. They're the best free TR proxy but they're
-          a different beast from owning a house.</li>
-      <li><b>ZHVI ignores rent, maintenance, and property tax.</b> Our RE return is a pure
-          price-index series (Zillow ZHVI). Real residential returns include rental yield
-          (positive carry) and maintenance / tax / insurance / vacancy costs (negative carry).
-          The yield-aware <code>fwd_3y_total</code> model in section 8 partially addresses
-          this for individual ZIPs, but not at the national-aggregate level shown here.</li>
-      <li><b>No leverage assumed.</b> Real-estate investors typically run 4-5× leverage via a
-          mortgage; the equity assets here are unlevered. A 3% nominal price return at 4×
-          leverage with a 6% mortgage is a different animal from the headline 3% — and that
-          gearing is what makes housing competitive with stocks for many households even when
-          the unlevered return is much lower.</li>
-      <li><b>Wilshire-from-FRED was retired in mid-2024;</b> we substitute VTI (Vanguard Total
-          Market) as the broad-equity proxy. Gold uses Yahoo's GC=F front-month futures (the
-          FRED London-fix series requires an API key, which is not configured in this run).</li>
-    </ul>
-  </div>
-
-  <h2>7 · Where might the model want to buy today?</h2>
-  {map_link_html}
-  <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
-     <b>top-100</b> US metros at the most recent month with enough feature coverage to make a confident
-     prediction. The table below is rolled up to <b>one row per metro (CBSA)</b> — earlier versions
-     keyed off the raw (city, state) of each ZIP, which split a single metro into dozens of tiny
-     hamlets (e.g. 10+ Pittsburgh-CBSA suburbs would all appear separately). Each row now shows the
-     metro's principal (largest-population) city, the best-scoring ZIP inside that metro, the mean
-     predicted return across the metro's top-5 ZIPs, and how many of its ZIPs land in the top 10%
-     of all predictions nationally. <b>Hover over any feature</b> to see its description.</p>
-  {leaderboard_html}
-
-  <h3>7a · ZIP-level detail (top 20)</h3>
-  <p>The same model expanded back to per-ZIP rows for users who want to drill into specific neighborhoods
-     rather than cities.</p>
-  {zip_leaderboard_html}
-
-  <div class='caveat'>
-    <b>Important caveats on the leaderboard:</b>
-    <ul style='margin-top: .4em; margin-bottom: 0;'>
-      <li><b>The p10/p90 bands tell the real story.</b> Top zips show point predictions of +5% to
-          +7%, but the 80% prediction interval per zip spans roughly
-          [<b>{band_p10:+.1f}%</b>, <b>{band_p90:+.1f}%</b>] — a <b>{band_width:.1f}-point</b> band
-          on median. The point estimate is the model's best guess; the band is the uncertainty.
-          Bet sizing should reflect the band, not the point.</li>
-      <li>The negative SHAP contribution from <code>fred.real_rate_10y</code> appears for every zip —
-          it's not a zip-specific signal, it's just "rates are high right now." Useful temporal context,
-          not actionable for picking.</li>
-      <li>This is a model output, not investment advice. The model is unaware of zoning, school
-          districts, walkability, specific listings, or your personal constraints. It has a positive
-          backtest signal, not a guarantee.</li>
-    </ul>
-  </div>
-
-  <h2>8 · Alternative ranking: yield-aware total return</h2>
-  <p>Everything above ranks zips by predicted <i>price</i> appreciation. An investor who cares about
-     yield (rent flowing in, not just paper appreciation) wants a different ranking: a separate
-     LightGBM trained on <code>fwd_3y_total = price_return + ZORI rent yield carry</code>. The
-     leaderboard below shows the top 30 zips by that target. Caveat: ZORI covers only ~11% of
-     zip-months, so this ranking's universe is much smaller (~2K zips vs ~10K for the price-only
-     model) and concentrated in zips where rent data exists.</p>
-  {total_leaderboard_html}
-  <p>The decision-different finding: only <b>11 of 50</b> zips appear in both this and the
-     price-only top 50 — a 22% overlap. Price-only tilts toward sunbelt fringe (Tulsa, Kansas City,
-     Memphis, New Orleans) at median rent yield ~12.5%. Total-return is dominated by rust-belt
-     high-yield zips (Detroit ×7, Cleveland ×5, Dayton, Akron, Toledo, Birmingham) at median rent
-     yield ~15.8%. Same model architecture, just yield-aware → very different shortlist.</p>
-
-  {overlay_section_html}
-
-  <h2>Caveats and what's not in this run</h2>
-  <ul>
-    <li><b>HMDA mortgage records are in the feature store but didn't reach the trained model.</b>
-        Tract-year origination counts + institutional-share are loaded at ~12% panel coverage,
-        but the data only spans 2020 / 2022 / 2023. The post-2012 split's train window ends at
-        2017-12 — entirely pre-HMDA — so prep's coverage filter drops every HMDA column from X.
-        A retrain confirmed this: same model, same SHAP, no HMDA. A genuinely HMDA-aware experiment
-        needs a different split design (e.g. train 2020-2022, test 2023-2026) where train actually
-        sees HMDA values. Filed as a future experiment.</li>
-    <li><b>Four data sources still pending.</b> FCC broadband (signed-URL endpoints, needs manual
-        download), NOAA VIIRS satellite nightlights (needs EOG creds + rasterio), Foursquare POIs,
-        and FBI NIBRS crime aggregates (needs <code>CDE_API_KEY</code>) are wired into the assembler
-        but blocked on credentials or manual fetch steps.</li>
-    <li><b>Owner-occupier overlay is geographically narrow.</b> {owner_occ_concentration}
-        because the filter chain (low climate risk + good schools + low disaster history +
-        high life expectancy + ≥50% owner-occupied) collapses to wealthy suburbs of one dominant
-        metro. Loosening any single filter would broaden geography but trade off the buyer's
-        stated priorities.</li>
-    <li><b>Total-return modeling now done but on a smaller universe.</b> ZORI rent index covers
-        only ~11% of zip-months, so <code>fwd_3y_total</code> trains on ~215K rows vs ~1.98M for
-        price-only. The model's headline Spearman (0.42) and backtest hit-rate (100%) are real but
-        scoped to yield-observable metros.</li>
-    <li><b>ElasticNet regressed under the new QuantileTransformer scaling.</b> The Wave-1 fix
-        solved an RMSE blowup but flipped fwd_3y Spearman to negative. LightGBM is unaffected and
-        remains the headline model; ElasticNet needs a tighter alpha or a different scaler.</li>
-    <li><b>Pre-2008 coverage is thin.</b> Realtor inventory (2016+), QCEW (2010+), ACS (2013+),
-        BPS (2011+), IRS-SOI (2011+) all start post-GFC. The pre_2008 results in the headline table
-        train on 27 features vs 41 post-2012 — same model, narrower feature pool.</li>
-    <li><b>fwd_5y walk-forward CV has 3 folds, not 5</b> — the 2021-12 and 2022-12 cutoffs would
-        need fwd_5y observability through 2026-12 / 2027-12, beyond the panel's end. Working as
-        designed.</li>
-  </ul>
-
-  <p class='footnote'>arbok · model-first, personal-overlay layered on top · all data free /
-     public sources · code at <code>src/arbok/</code> ·
-     <a href='mailto:author@example.com'>contact</a> for source / methodology questions.</p>
-</body>
-</html>
-"""
-    out = PROCESSED / "report.html"
-    out.write_text(html)
-    print(f"Wrote {out}  ({out.stat().st_size/1024:.1f} KB)")
+    # Remove the stale single-page report.html (the workflow used to copy it
+    # to _site/index.html; we now copy index.html + methods.html directly).
+    old = PROCESSED / "report.html"
+    if old.exists():
+        old.unlink()
+        print(f"Removed legacy {old}")
 
 
 if __name__ == "__main__":
