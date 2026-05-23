@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "data/processed/report.html"
+      - "data/processed/zip_decile_map.html"
+      - "data/processed/assets/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -27,6 +29,10 @@ jobs:
         run: |
           mkdir -p _site
           cp data/processed/report.html _site/index.html
+          cp data/processed/zip_decile_map.html _site/zip_decile_map.html
+          if [ -d data/processed/assets ]; then
+            cp -R data/processed/assets _site/assets
+          fi
 
       - uses: actions/configure-pages@v5
 

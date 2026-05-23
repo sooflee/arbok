@@ -545,22 +545,36 @@ def _render_html(
     def _summary(df: pd.DataFrame, kind: str) -> str:
         if df.empty:
             return f"<p><i>No zips passed {kind} filters.</i></p>"
-        top_metros = df["metro_name"].value_counts().head(3)
+        metro_counts = df["metro_name"].value_counts()
+        top_metros = metro_counts.head(3)
         if kind == "owner-occupier":
             med_pred = df["pred_fwd_3y"].median() * 100
+            # Dominant-metro concentration stat: "{N} of 30 zips fall in {metro}".
+            dominant_metro = metro_counts.index[0]
+            dominant_count = int(metro_counts.iloc[0])
+            concentration = (
+                f"<b>{dominant_count} of {len(df)} zips fall in "
+                f"{escape(str(dominant_metro))}</b>"
+            )
             return (
-                f"<p><b>{len(df)} zips</b>; dominant metros: "
-                + ", ".join(f"{m} ({n})" for m, n in top_metros.items())
+                f"<p><b>{len(df)} zips</b>; {concentration}. "
+                + "Dominant metros: "
+                + ", ".join(f"{escape(str(m))} ({n})" for m, n in top_metros.items())
                 + f". Median ZHVI <b>${df['zhvi'].median():,.0f}</b>; "
                 + f"median predicted fwd_3y price return <b>{med_pred:+.2f}%</b>.</p>"
             )
         else:
             med_yield = df["rent_yield_t"].median() * 100
             med_total = df["pred_fwd_3y_total"].median() * 100
+            # Investor concentration stat: "spread across {N} metros: {top-3}".
+            n_metros = int(metro_counts.size)
+            top3_str = ", ".join(
+                f"{escape(str(m))} ({n})" for m, n in top_metros.items()
+            )
+            spread = f"<b>spread across {n_metros} metros: {top3_str}</b>"
             return (
-                f"<p><b>{len(df)} zips</b>; dominant metros: "
-                + ", ".join(f"{m} ({n})" for m, n in top_metros.items())
-                + f". Median ZHVI <b>${df['zhvi'].median():,.0f}</b>; "
+                f"<p><b>{len(df)} zips</b>; {spread}. "
+                + f"Median ZHVI <b>${df['zhvi'].median():,.0f}</b>; "
                 + f"median rent yield <b>{med_yield:.2f}%</b>; "
                 + f"median predicted fwd_3y total return <b>{med_total:+.2f}%</b>.</p>"
             )
@@ -604,7 +618,7 @@ def _render_html(
         )
 
     return f"""
-  <h2>6 · Personal-overlay shortlists (Phase 4)</h2>
+  <h2>9 · Personal-overlay shortlists (Phase 4)</h2>
   <p>Two parallel ZIP-level shortlists, both nationwide and both built on the
      latest snapshot (<b>{latest.strftime('%Y-%m')}</b>), one tuned for an
      owner-occupier and one for a cash-flow investor. Filter thresholds use the
@@ -616,7 +630,7 @@ def _render_html(
      display tables below dedupe by metro (CBSA) so you don't see the same city
      ten times.</p>
 
-  <h3>6a · Owner-occupier (price-return focus)</h3>
+  <h3>9a · Owner-occupier (price-return focus)</h3>
   <p>Scored on the price-only fwd_3y model. Filters keep zips with positive
      expected price return AND low climate risk (wildfire + flood ≤ median),
      low recent disaster frequency (≤ 5 FEMA declarations in 10 years), strong
@@ -627,7 +641,7 @@ def _render_html(
   {_owner_table_html(oo_out)}
   {skipped_oo_html}
 
-  <h3>6b · Investor (total-return + rent-yield focus)</h3>
+  <h3>9b · Investor (total-return + rent-yield focus)</h3>
   <p>Scored on the total-return fwd_3y model (price appreciation + ZORI rent
      carry, trained in the Phase 2 total-return run). Filters keep zips in the
      top quartile of predicted total return AND with a gross rent yield ≥ 6%,
@@ -638,7 +652,7 @@ def _render_html(
   {_investor_table_html(inv_out)}
   {skipped_inv_html}
 
-  <h3>6c · Overlap and threshold transparency</h3>
+  <h3>9c · Overlap and threshold transparency</h3>
   {overlap_note}
   <p><b>Median thresholds used (over top-{TOP_N_METROS}-metro snapshot zips):</b></p>
   <ul>

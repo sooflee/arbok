@@ -1,5 +1,5 @@
 
-  <h2>8 · Personal-overlay shortlists (Phase 4)</h2>
+  <h2>9 · Personal-overlay shortlists (Phase 4)</h2>
   <p>Two parallel ZIP-level shortlists, both nationwide and both built on the
      latest snapshot (<b>2023-12</b>), one tuned for an
      owner-occupier and one for a cash-flow investor. Filter thresholds use the
@@ -11,29 +11,29 @@
      display tables below dedupe by metro (CBSA) so you don't see the same city
      ten times.</p>
 
-  <h3>8a · Owner-occupier (price-return focus)</h3>
+  <h3>9a · Owner-occupier (price-return focus)</h3>
   <p>Scored on the price-only fwd_3y model. Filters keep zips with positive
      expected price return AND low climate risk (wildfire + flood ≤ median),
      low recent disaster frequency (≤ 5 FEMA declarations in 10 years), strong
      schools (student-teacher ratio ≤ median), good health outcomes
      (premature death rate ≤ median, as a life-expectancy proxy), and majority
      owner-occupied (acs__owner_occupied_pct ≥ 0.5).</p>
-  <p><b>30 zips</b>; dominant metros: Washington, DC (22), Toledo, OH (7), Madison, WI (1). Median ZHVI <b>$722,904</b>; median predicted fwd_3y price return <b>+1.59%</b>.</p>
+  <p><b>30 zips</b>; <b>22 of 30 zips fall in Washington, DC</b>. Dominant metros: Washington, DC (22), Toledo, OH (7), Madison, WI (1). Median ZHVI <b>$722,904</b>; median predicted fwd_3y price return <b>+1.59%</b>.</p>
   <table class='leaderboard'><tr><th>ZIP</th><th>City, State</th><th>Metro</th><th>ZHVI</th><th>Pred fwd_3y</th><th>p10</th><th>p90</th><th>NRI wildfire</th><th>NRI flood</th><th>FEMA 10y</th><th>Stud/Tchr</th><th>Prem. death (yppl)</th><th>ACS own%</th></tr><tr><td>43406</td><td>Bradner, OH</td><td>Toledo, OH</td><td>$152,730</td><td>+2.29%</td><td>-1.18%</td><td>+10.62%</td><td>45.5</td><td>53.7</td><td>2</td><td>14.2</td><td>6423</td><td>0.79</td></tr><tr><td>20152</td><td>Chantilly, VA</td><td>Washington, DC</td><td>$832,524</td><td>+2.09%</td><td>-3.82%</td><td>+7.72%</td><td>33.0</td><td>35.7</td><td>4</td><td>12.5</td><td>3243</td><td>0.85</td></tr><tr><td>53566</td><td>Monroe, WI</td><td>Madison, WI</td><td>$245,767</td><td>+1.64%</td><td>-1.38%</td><td>+9.47%</td><td>52.5</td><td>42.4</td><td>2</td><td>12.5</td><td>6196</td><td>0.69</td></tr></table>
   <p class='caveat'><b>Owner-occupier filters skipped:</b><ul><li>crime__*_per_100k (NIBRS not in feature store — needs FBI CDE_API_KEY)</li></ul></p>
 
-  <h3>8b · Investor (total-return + rent-yield focus)</h3>
+  <h3>9b · Investor (total-return + rent-yield focus)</h3>
   <p>Scored on the total-return fwd_3y model (price appreciation + ZORI rent
      carry, trained in the Phase 2 total-return run). Filters keep zips in the
      top quartile of predicted total return AND with a gross rent yield ≥ 6%,
      a ZHVI in the cash-flow-friendly band ($80K–$400K), and ACS
      owner-occupancy share in [0.4, 0.7] so there's an active rental market
      without signalling deep distress.</p>
-  <p><b>30 zips</b>; dominant metros: Kansas City, MO (4), St. Louis, MO (4), Detroit, MI (3). Median ZHVI <b>$89,010</b>; median rent yield <b>13.74%</b>; median predicted fwd_3y total return <b>+27.90%</b>.</p>
+  <p><b>30 zips</b>; <b>spread across 15 metros: Kansas City, MO (4), St. Louis, MO (4), Detroit, MI (3)</b>. Median ZHVI <b>$89,010</b>; median rent yield <b>13.74%</b>; median predicted fwd_3y total return <b>+27.90%</b>.</p>
   <table class='leaderboard'><tr><th>ZIP</th><th>City, State</th><th>Metro</th><th>ZHVI</th><th>ZORI</th><th>Rent yield</th><th>Pred fwd_3y total</th><th>Pred fwd_3y (price)</th><th>ACS own%</th></tr><tr><td>19133</td><td>Philadelphia, PA</td><td>Philadelphia, PA</td><td>$81,289</td><td>$1,278</td><td>+18.87%</td><td>+32.60%</td><td>+3.28%</td><td>0.41</td></tr><tr><td>64128</td><td>Kansas City, MO</td><td>Kansas City, MO</td><td>$89,801</td><td>$1,165</td><td>+15.57%</td><td>+32.12%</td><td>+7.27%</td><td>0.45</td></tr><tr><td>63137</td><td>Saint Louis, MO</td><td>St. Louis, MO</td><td>$86,974</td><td>$1,100</td><td>+15.18%</td><td>+31.21%</td><td>+3.56%</td><td>0.51</td></tr><tr><td>35228</td><td>Birmingham, AL</td><td>Birmingham, AL</td><td>$81,166</td><td>$1,024</td><td>+15.14%</td><td>+31.06%</td><td>+2.66%</td><td>0.61</td></tr><tr><td>48219</td><td>Detroit, MI</td><td>Detroit, MI</td><td>$80,777</td><td>$1,085</td><td>+16.12%</td><td>+29.74%</td><td>+2.14%</td><td>0.55</td></tr><tr><td>38114</td><td>Memphis, TN</td><td>Memphis, TN</td><td>$82,035</td><td>$865</td><td>+12.65%</td><td>+29.50%</td><td>+5.05%</td><td>0.45</td></tr><tr><td>45406</td><td>Dayton, OH</td><td>Dayton, OH</td><td>$85,512</td><td>$1,006</td><td>+14.12%</td><td>+28.72%</td><td>+4.13%</td><td>0.48</td></tr><tr><td>44128</td><td>Cleveland, OH</td><td>Cleveland, OH</td><td>$94,931</td><td>$1,114</td><td>+14.08%</td><td>+28.47%</td><td>+2.78%</td><td>0.48</td></tr><tr><td>44306</td><td>Akron, OH</td><td>Akron, OH</td><td>$80,899</td><td>$849</td><td>+12.59%</td><td>+28.27%</td><td>+3.58%</td><td>0.45</td></tr><tr><td>46016</td><td>Anderson, IN</td><td>Indianapolis, IN</td><td>$80,043</td><td>$778</td><td>+11.66%</td><td>+27.90%</td><td>+4.51%</td><td>0.42</td></tr><tr><td>39212</td><td>Jackson, MS</td><td>Jackson, MS</td><td>$85,231</td><td>$1,016</td><td>+14.31%</td><td>+26.12%</td><td>+2.79%</td><td>0.64</td></tr><tr><td>32209</td><td>Jacksonville, FL</td><td>Jacksonville, FL</td><td>$117,406</td><td>$1,079</td><td>+11.03%</td><td>+26.11%</td><td>+5.06%</td><td>0.47</td></tr><tr><td>15210</td><td>Pittsburgh, PA</td><td>Pittsburgh, PA</td><td>$106,779</td><td>$1,173</td><td>+13.18%</td><td>+25.50%</td><td>+2.37%</td><td>0.55</td></tr><tr><td>21213</td><td>Baltimore, MD</td><td>Baltimore, MD</td><td>$119,160</td><td>$1,477</td><td>+14.88%</td><td>+25.18%</td><td>+2.24%</td><td>0.55</td></tr><tr><td>78207</td><td>San Antonio, TX</td><td>San Antonio, TX</td><td>$120,432</td><td>$1,188</td><td>+11.84%</td><td>+24.93%</td><td>+2.05%</td><td>0.44</td></tr></table>
   
 
-  <h3>6c · Overlap and threshold transparency</h3>
+  <h3>9c · Overlap and threshold transparency</h3>
   <p><b>The two shortlists do not overlap on any ZIP.</b> The owner-occupier profile up-weights low-risk, school-strong, low-disaster areas while the investor profile favors lower-priced, higher-yield areas; they end up pointing at different zips by construction.</p>
   <p><b>Median thresholds used (over top-100-metro snapshot zips):</b></p>
   <ul>

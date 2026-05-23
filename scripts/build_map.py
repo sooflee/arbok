@@ -11,15 +11,18 @@ from pathlib import Path
 import folium
 import geopandas as gpd
 import lightgbm as lgb
+import matplotlib
 import numpy as np
 import pandas as pd
 from branca.colormap import LinearColormap
+from branca.element import Element
 
 from arbok.config import PROCESSED, RAW
 
 POST_2012_LGBM = PROCESSED / "phase2_artifacts" / "fwd_3y__post_2012__lgbm.txt"
 POST_2012_FEATS = PROCESSED / "phase2_artifacts" / "fwd_3y__post_2012__lgbm.features.txt"
 TIGER_SHP = RAW / "census_zcta" / "tl_2020_us_zcta520.shp"
+ZIP_LEADERBOARD = PROCESSED / "zip_leaderboard.parquet"
 OUT_HTML = PROCESSED / "zip_decile_map.html"
 
 
@@ -94,6 +97,18 @@ def load_simplified_shapes(zip_set: set[str]) -> gpd.GeoDataFrame:
     return gdf
 
 
+def _cividis_hex(n: int = 10) -> list[str]:
+    """Return n discrete hex colors from matplotlib's cividis colormap.
+
+    Cividis is perceptually uniform AND specifically designed to be readable by
+    viewers with common forms of color-vision deficiency (CVD). Unlike a
+    red->green diverging palette, the gradient is monotonic in luminance so
+    the ordering is unambiguous even in grayscale or for color-blind users.
+    """
+    cmap = matplotlib.colormaps["cividis"]
+    return [matplotlib.colors.rgb2hex(cmap(i / (n - 1))) for i in range(n)]
+
+
 def build_map(scored: pd.DataFrame, shapes: gpd.GeoDataFrame) -> folium.Map:
     """Render a Folium choropleth keyed by zip decile, with a tooltip per zip."""
     merged = shapes.merge(scored, on="zip", how="inner")
@@ -108,14 +123,33 @@ def build_map(scored: pd.DataFrame, shapes: gpd.GeoDataFrame) -> folium.Map:
         top_metros["metro_name"] = top_metros["cbsa"]
     merged = merged.merge(top_metros[["cbsa", "metro_name"]], on="cbsa", how="left")
 
-    # Center on CONUS
-    m = folium.Map(location=[39.5, -98.5], zoom_start=4, tiles="CartoDB positron")
+    # Optional: join 80% prediction interval (p10/p90) from the top-50
+    # zip_leaderboard.parquet. Only those zips will have the band; the rest
+    # show a dash.
+    if ZIP_LEADERBOARD.exists():
+        lb = pd.read_parquet(ZIP_LEADERBOARD)
+        lb["zip"] = lb["zip"].astype(str).str.zfill(5)
+        keep_cols = ["zip"] + [c for c in ("pred_p10", "pred_p90") if c in lb.columns]
+        if len(keep_cols) >= 3:
+            merged = merged.merge(lb[keep_cols].drop_duplicates("zip"), on="zip", how="left")
+        else:
+            merged["pred_p10"] = np.nan
+            merged["pred_p90"] = np.nan
+    else:
+        merged["pred_p10"] = np.nan
+        merged["pred_p90"] = np.nan
 
-    # Diverging colormap: red (bottom decile) → grey (mid) → green (top decile)
+    # Start the map; we'll snap the initial view to the data extent below
+    # (better for mobile than a fixed CONUS zoom).
+    m = folium.Map(location=[39.5, -98.5], zoom_start=5, tiles="CartoDB positron")
+
+    # Colorblind-safe perceptually uniform palette (cividis, 10 discrete bins).
+    # Replaces the prior red->green diverging palette which is unreadable for
+    # ~8% of men with red-green color-vision deficiency.
     cmap = LinearColormap(
-        colors=["#a50026", "#f46d43", "#fdae61", "#fee08b", "#ffffbf",
-                "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"],
-        vmin=0, vmax=9, caption="Predicted fwd_3y return decile (9 = top 10%)",
+        colors=_cividis_hex(10),
+        vmin=0, vmax=9,
+        caption="Predicted fwd_3y return decile rank (0 = bottom 10% → 9 = top 10%)",
     )
     cmap.add_to(m)
 
@@ -127,40 +161,88 @@ def build_map(scored: pd.DataFrame, shapes: gpd.GeoDataFrame) -> folium.Map:
             "fillColor": cmap(int(decile)),
             "color": "#666",
             "weight": 0.1,
-            "fillOpacity": 0.65,
+            "fillOpacity": 0.75,
         }
 
-    def make_props(row):
-        zhvi = f"${row.zhvi:,.0f}" if pd.notna(row.zhvi) else "—"
-        pred = f"{row.pred*100:+.2f}%"
-        metro = row.metro_name if pd.notna(row.metro_name) else "—"
-        return {
-            "zip": row.zip,
-            "metro": metro,
-            "zhvi": zhvi,
-            "pred": pred,
-            "decile": int(row.decile) if pd.notna(row.decile) else None,
-        }
-
-    # Convert to a GeoJSON-ish structure that Folium can ingest.
-    # Use folium.GeoJson with a tooltip; keep properties light.
+    # Build the per-feature props the tooltip will use.
     merged_for_geo = merged.copy()
     merged_for_geo["pred_pct"] = (merged_for_geo["pred"] * 100).round(2)
     merged_for_geo["zhvi_fmt"] = merged_for_geo["zhvi"].apply(
         lambda x: f"${x:,.0f}" if pd.notna(x) else "—"
     )
+
+    # Human-readable decile label, e.g. "9 (top 10%)" or "0 (bottom 10%)".
+    def _decile_label(d) -> str:
+        if pd.isna(d):
+            return "—"
+        di = int(d)
+        if di == 9:
+            return f"{di} of 9 (top 10%)"
+        if di == 0:
+            return f"{di} of 9 (bottom 10%)"
+        return f"{di} of 9"
+
+    merged_for_geo["decile_label"] = merged_for_geo["decile"].apply(_decile_label)
+
+    # 80% prediction band; only populated for top-50 leaderboard zips.
+    def _band(row) -> str:
+        p10, p90 = row.get("pred_p10"), row.get("pred_p90")
+        if pd.isna(p10) or pd.isna(p90):
+            return "—"
+        return f"{p10*100:+.2f}% to {p90*100:+.2f}%"
+
+    merged_for_geo["band_fmt"] = merged_for_geo.apply(_band, axis=1)
+
     folium.GeoJson(
-        merged_for_geo[["zip", "metro_name", "zhvi_fmt", "pred_pct", "decile", "geometry"]],
+        merged_for_geo[[
+            "zip", "metro_name", "zhvi_fmt", "pred_pct",
+            "decile", "decile_label", "band_fmt", "geometry",
+        ]],
         name="ZIP decile",
         style_function=style_fn,
         tooltip=folium.GeoJsonTooltip(
-            fields=["zip", "metro_name", "zhvi_fmt", "pred_pct", "decile"],
-            aliases=["ZIP:", "Metro:", "ZHVI:", "Pred fwd_3y ann.:", "Decile (0=bot, 9=top):"],
+            fields=["zip", "metro_name", "zhvi_fmt", "pred_pct", "decile_label", "band_fmt"],
+            aliases=[
+                "ZIP:",
+                "Metro:",
+                "ZHVI:",
+                "Pred fwd_3y ann.:",
+                "Decile rank (0=worst → 9=best):",
+                "80% pred. band (top-50 only):",
+            ],
             localize=True,
             sticky=False,
             labels=True,
         ),
     ).add_to(m)
+
+    # Frame the initial view to the actual data extent so mobile users
+    # don't open to a tiny CONUS view.
+    try:
+        minx, miny, maxx, maxy = merged.total_bounds
+        if np.isfinite([minx, miny, maxx, maxy]).all():
+            m.fit_bounds([[miny, minx], [maxy, maxx]])
+    except Exception as e:  # pragma: no cover - best effort
+        print(f"  [warn] fit_bounds failed: {e}")
+
+    # Nudge the colormap legend to the bottom of the viewport. branca's
+    # LinearColormap renders absolutely-positioned SVG at the top of the page
+    # by default; on small screens that overlaps page content. Force it to
+    # bottom-right via CSS.
+    legend_css = """
+    <style>
+      svg.legend { top: auto !important; bottom: 14px !important;
+                   right: 14px !important; left: auto !important;
+                   max-width: 92vw !important; background: rgba(255,255,255,0.85);
+                   padding: 4px 6px; border-radius: 4px;
+                   box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+      @media (max-width: 600px) {
+        svg.legend { transform: scale(0.85); transform-origin: bottom right; }
+      }
+    </style>
+    """
+    m.get_root().header.add_child(Element(legend_css))
+
     return m
 
 

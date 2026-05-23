@@ -10,6 +10,7 @@ Output: data/processed/report.html (open in any browser, no server needed).
 from dotenv import load_dotenv
 load_dotenv()
 
+import datetime
 from html import escape
 
 import lightgbm as lgb
@@ -23,6 +24,11 @@ import shap
 from arbok.config import PROCESSED
 from arbok.labels import label as feat_label
 
+# Build date used to cache-bust the iframe + static asset URLs on GitHub Pages.
+BUILD_DATE = datetime.date.today().isoformat()
+# GitHub Pages site URL (used for og:url meta tag). Hard-coded from `git remote`.
+SITE_URL = "https://sooflee.github.io/arbok/"
+
 ARTIFACTS = PROCESSED / "phase2_artifacts"
 RESULTS = pd.read_parquet(PROCESSED / "phase2_results.parquet")
 LEADERBOARD = pd.read_parquet(PROCESSED / "zip_leaderboard.parquet")
@@ -33,6 +39,21 @@ BACKTEST_PRICE = pd.read_parquet(PROCESSED / "backtest_topdecile.parquet") if (P
 BACKTEST_TOTAL = pd.read_parquet(PROCESSED / "backtest_topdecile_total.parquet") if (PROCESSED / "backtest_topdecile_total.parquet").exists() else None
 ZIP_LB_TOTAL = pd.read_parquet(PROCESSED / "zip_leaderboard_total.parquet") if (PROCESSED / "zip_leaderboard_total.parquet").exists() else None
 OVERLAY_HTML = (PROCESSED / "overlay.html").read_text() if (PROCESSED / "overlay.html").exists() else None
+OVERLAY_OWNER_OCC = pd.read_parquet(PROCESSED / "overlay_owner_occupier.parquet") if (PROCESSED / "overlay_owner_occupier.parquet").exists() else None
+
+
+def owner_occupier_concentration_stat() -> str:
+    """Return text like '22 of 30 zips fall in the Washington, DC metro' computed live."""
+    if OVERLAY_OWNER_OCC is None or OVERLAY_OWNER_OCC.empty:
+        return "the overlay's filter chain"
+    df = OVERLAY_OWNER_OCC.copy()
+    name_col = "metro_name" if "metro_name" in df.columns else ("cbsa" if "cbsa" in df.columns else None)
+    if name_col is None:
+        return f"{len(df)} zips"
+    counts = df[name_col].value_counts()
+    top_metro = counts.index[0]
+    top_n = int(counts.iloc[0])
+    return f"{top_n} of {len(df)} zips fall in the {top_metro} metro"
 FS = pd.read_parquet(PROCESSED / "feature_store_zip_month.parquet")
 ZIP_GEO = pd.read_parquet(PROCESSED / "zip_geo.parquet") if (PROCESSED / "zip_geo.parquet").exists() else None
 TOP_METROS = pd.read_csv(PROCESSED / "top_metros.csv") if (PROCESSED / "top_metros.csv").exists() else None
@@ -49,8 +70,27 @@ HORIZON_CLASS = {"fwd_1y": "short (1y)", "fwd_3y": "medium (3y)", "fwd_5y": "lon
 SPLIT_LABEL = {"pre_2008": "pre-2008 (GFC stress)", "post_2012": "post-2012 (main)"}
 
 
-def _div(fig: go.Figure, include_js: bool) -> str:
-    return pio.to_html(fig, full_html=False, include_plotlyjs=("cdn" if include_js else False))
+def _div(fig: go.Figure, include_js: bool, aria_label: str | None = None) -> str:
+    """Render a Plotly figure as an HTML <div>.
+
+    Plotly is inlined exactly once per report (the first chart sets
+    ``include_js=True``; everything else passes ``False`` and reuses the bundle).
+    This makes the report self-contained and immune to CDN flakiness on
+    GitHub Pages at the cost of ~3 MB.
+
+    Wrapping the figure in a ``role='img'`` / ``aria-label`` div gives screen
+    readers something to announce — Plotly's own SVG doesn't expose this.
+    """
+    html = pio.to_html(fig, full_html=False, include_plotlyjs=(True if include_js else False))
+    if aria_label:
+        return f"<div role='img' aria-label=\"{escape(aria_label)}\">{html}</div>"
+    return html
+
+
+def _wrap_table(table_html: str) -> str:
+    """Wrap a table in a horizontal-scroll container so wide tables don't
+    overflow narrow mobile viewports."""
+    return f"<div style='overflow-x:auto'>{table_html}</div>"
 
 
 def chart_decile_spread() -> go.Figure:
@@ -122,7 +162,15 @@ def chart_shap_for(horizon: str, split: str = "post_2012", k: int = 15) -> go.Fi
 
 
 def _humanize_drivers(s: str) -> str:
-    """Turn 'fred.real_rate_10y(-0.040), nri.wildfire_risk(+0.009)' into '10Y real rate (-0.040), NRI wildfire risk (+0.009)'."""
+    """Turn 'fred.real_rate_10y(-0.040), nri.wildfire_risk(+0.009)' into '10Y real rate (-0.040), NRI wildfire risk (+0.009)'.
+
+    The wrapping ``<span class='tt'>`` element is both ``tabindex='0'`` (so
+    keyboard users can focus it) and CSS-styled to reveal a sibling
+    ``.tt-body`` on hover, focus, OR focus-within — meaning the description
+    surfaces on tap (touch fires focus on the tabindex'd span) without needing
+    a single line of JavaScript. The native ``title`` attr is kept too so the
+    browser's own tooltip still works for mouse users.
+    """
     if not isinstance(s, str):
         return ""
     out_parts = []
@@ -135,7 +183,12 @@ def _humanize_drivers(s: str) -> str:
             name, num = part, ""
         raw = name.replace(".", "__")
         display, desc = feat_label(raw)
-        out_parts.append(f"<span title='{escape(desc)}'>{escape(display)}</span> <code>{escape(num)}</code>")
+        out_parts.append(
+            f"<span class='tt' tabindex='0' title='{escape(desc)}'>"
+            f"{escape(display)}"
+            f"<span class='tt-body'>{escape(desc)}</span>"
+            f"</span> <code>{escape(num)}</code>"
+        )
     return ", ".join(out_parts)
 
 
@@ -201,7 +254,7 @@ def chart_city_leaderboard_top_n(n: int = 30) -> str:
                 cells.append(f"<td>{escape(str(v))}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     head = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in df.columns) + "</tr>"
-    return f"<table class='leaderboard'>{head}{''.join(rows)}</table>"
+    return _wrap_table(f"<table class='leaderboard'>{head}{''.join(rows)}</table>")
 
 
 def chart_leaderboard_top_n(n: int = 20) -> str:
@@ -240,7 +293,7 @@ def chart_leaderboard_top_n(n: int = 20) -> str:
                 cells.append(f"<td>{escape(str(v))}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     head = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in df.columns) + "</tr>"
-    return f"<table class='leaderboard'>{head}{''.join(rows)}</table>"
+    return _wrap_table(f"<table class='leaderboard'>{head}{''.join(rows)}</table>")
 
 
 def price_stratified_decile_spread(
@@ -304,13 +357,13 @@ def chart_price_stratification_table() -> str:
             f"<td>{r['spread']*100:+.2f}%</td>"
             f"</tr>"
         )
-    return f"""
+    return _wrap_table(f"""
     <table class='headline'>
       <tr><th>price tier (ZHVI)</th><th>test rows</th><th>median ZHVI</th>
           <th>top decile realized</th><th>bottom decile realized</th><th>decile spread</th></tr>
       {"".join(rows)}
     </table>
-    """
+    """)
 
 
 def chart_headline_table() -> str:
@@ -342,12 +395,12 @@ def chart_headline_table() -> str:
                 f"<td>{r['bot_decile_mean']*100:+.2f}%</td>"
                 f"</tr>"
             )
-    return f"""
+    return _wrap_table(f"""
     <table class='headline'>
       <tr><th>horizon</th><th>best model</th><th>Spearman ρ</th><th>decile spread</th><th>top decile</th><th>bottom decile</th></tr>
       {"".join(section_rows)}
     </table>
-    """
+    """)
 
 
 def _summarize_cv(df: pd.DataFrame) -> pd.DataFrame:
@@ -398,13 +451,13 @@ def chart_walkforward_table() -> str:
             f"<td>{r['std_spread']*100:.2f}%</td>"
             f"</tr>"
         )
-    return f"""
+    return _wrap_table(f"""
     <table class='headline'>
       <tr><th>horizon</th><th>n folds</th><th>mean Spearman ρ</th><th>std ρ</th>
           <th>95% interval ρ</th><th>mean decile spread</th><th>std decile spread</th></tr>
       {"".join(rows)}
     </table>
-    """
+    """)
 
 
 def chart_spatialcv_tables() -> tuple:
@@ -430,13 +483,13 @@ def chart_spatialcv_tables() -> tuple:
                 f"<td>{r['std_spread']*100:.2f}%</td>"
                 f"</tr>"
             )
-        return f"""
+        return _wrap_table(f"""
         <table class='headline'>
           <tr><th>horizon</th><th>n folds</th><th>mean Spearman ρ</th><th>std ρ</th>
               <th>mean decile spread</th><th>std decile spread</th></tr>
           {"".join(rows)}
         </table>
-        """
+        """)
 
     raw = SPATIALCV[(SPATIALCV["model"] == "lightgbm") & (SPATIALCV["demean"] == False)]  # noqa: E712
     dem = SPATIALCV[(SPATIALCV["model"] == "lightgbm") & (SPATIALCV["demean"] == True)]  # noqa: E712
@@ -505,14 +558,14 @@ def chart_backtest_summary_table() -> str:
             f"<td><b>{excess:+.2f} pp</b></td><td>{top_bot:+.2f} pp</td>"
             f"<td><b>{hit_rate:.1f}%</b></td></tr>"
         )
-    return f"""
+    return _wrap_table(f"""
     <table class='headline'>
       <tr><th>model</th><th>months</th><th>universe / mo</th><th>top-10% basket</th>
           <th>top-10% realized</th><th>universe realized</th><th>bottom-10% realized</th>
           <th>top excess</th><th>top − bot spread</th><th>hit rate (top &gt; univ)</th></tr>
       {"".join(rows)}
     </table>
-    """
+    """)
 
 
 def chart_total_leaderboard_top_n(n: int = 30) -> str:
@@ -538,11 +591,11 @@ def chart_total_leaderboard_top_n(n: int = 30) -> str:
                 cells.append(f"<td>{c}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     header = "<tr>" + "".join(f"<th>{h}</th>" for h in df.columns) + "</tr>"
-    return f"<table class='leaderboard'>{header}{''.join(rows)}</table>"
+    return _wrap_table(f"<table class='leaderboard'>{header}{''.join(rows)}</table>")
 
 
 # ---------------------------------------------------------------------------
-# Macro context (section 5b): timing chart + hedge comparison.
+# Macro context (section 6): timing chart + hedge comparison.
 # Built from scripts/macro_context.py outputs.
 # ---------------------------------------------------------------------------
 TIMING_PARQUET = PROCESSED / "timing_universe_mean.parquet"
@@ -746,7 +799,7 @@ def hedge_historical_table() -> str:
             f"<td>{five}</td>"
             f"<td>{five_pos}</td></tr>"
         )
-    return (
+    return _wrap_table(
         "<table class='headline'>"
         "<tr><th>asset</th><th>history starts</th>"
         "<th>median 3y real return</th><th>std 3y real</th>"
@@ -806,7 +859,7 @@ def hedge_trailing_table() -> str:
             f"<td>{med_html}</td>"
             f"<td>{sp_html}</td></tr>"
         )
-    return (
+    return _wrap_table(
         "<table class='headline'>"
         "<tr><th>asset</th><th>window ends</th>"
         "<th>trailing 3y real return</th><th>trailing 3y nominal</th>"
@@ -856,6 +909,393 @@ def backtest_summary_stats() -> dict:
             "months": int(len(df)),
         }
     return {"price": stats(BACKTEST_PRICE), "total": stats(BACKTEST_TOTAL)}
+
+
+# ---------------------------------------------------------------------------
+# Extra visuals: decile-by-decile curve, equity curve, calibration scatter,
+# quantile fan, CV schematics, forward-return illustration, SHAP waterfalls.
+# All built around the fwd_3y / post_2012 LightGBM (headline horizon × split).
+# ---------------------------------------------------------------------------
+
+def _headline_test_predictions(horizon: str = "fwd_3y", split: str = "post_2012") -> pd.DataFrame:
+    """Score the headline model on its test window. Cached on the function attr."""
+    cache_key = f"_cache_{horizon}_{split}"
+    if hasattr(_headline_test_predictions, cache_key):
+        return getattr(_headline_test_predictions, cache_key)
+    booster = lgb.Booster(model_file=str(ARTIFACTS / f"{horizon}__{split}__lgbm.txt"))
+    features = (ARTIFACTS / f"{horizon}__{split}__lgbm.features.txt").read_text().strip().split("\n")
+    mask = FS[f"is_test_{split}"].fillna(False) & FS[horizon].notna()
+    X = FS.loc[mask, features].copy()
+    X = X.fillna(X.median(numeric_only=True))
+    out = pd.DataFrame({
+        "zip": FS.loc[mask, "zip"].to_numpy(),
+        "cbsa": FS.loc[mask, "cbsa"].to_numpy(),
+        "year_month": FS.loc[mask, "year_month"].to_numpy(),
+        "predicted": booster.predict(X),
+        "realized": FS.loc[mask, horizon].to_numpy(),
+    }).dropna(subset=["predicted", "realized"]).reset_index(drop=True)
+    setattr(_headline_test_predictions, cache_key, out)
+    return out
+
+
+def chart_decile_curve() -> go.Figure:
+    """All 10 deciles realized return — not just the top-bottom spread. Shows
+    whether the signal is monotone across the whole rank."""
+    df = _headline_test_predictions()
+    df["decile"] = pd.qcut(df["predicted"], 10, labels=False, duplicates="drop") + 1
+    g = df.groupby("decile")["realized"].agg(["mean", "std", "count"]).reset_index()
+    colors = ["#a50026"] + ["#5a7ec3"] * 8 + ["#1a9850"]
+    fig = go.Figure(go.Bar(
+        x=g["decile"], y=g["mean"], marker_color=colors,
+        error_y=dict(type="data", array=g["std"] / np.sqrt(g["count"]), thickness=1),
+        hovertemplate="Decile %{x}<br>Realized fwd_3y ann.: %{y:.2%}<br>n=%{customdata:,}<extra></extra>",
+        customdata=g["count"],
+    ))
+    fig.add_hline(y=df["realized"].mean(), line=dict(color="#666", dash="dash"),
+                  annotation_text="universe mean", annotation_position="top right")
+    fig.update_yaxes(tickformat=".1%", title="Realized fwd_3y annualized return")
+    fig.update_xaxes(title="Predicted decile (1 = lowest, 10 = highest)", dtick=1)
+    fig.update_layout(
+        title="Realized return by predicted decile — fwd_3y post-2012 (LightGBM)",
+        height=380, margin=dict(l=60, r=20, t=60, b=50), showlegend=False,
+    )
+    return fig
+
+
+def chart_equity_curve() -> go.Figure | None:
+    """Wealth-per-cohort: $1 invested at each score_month, terminal value after a 3y hold.
+    Three series: top-decile basket vs universe vs bottom-decile."""
+    if BACKTEST_PRICE is None or BACKTEST_PRICE.empty:
+        return None
+    df = BACKTEST_PRICE.sort_values("score_month").copy()
+    df["score_month"] = pd.to_datetime(df["score_month"])
+    for col in ["mean_realized_top10", "mean_realized_universe", "mean_realized_bot10"]:
+        df[col.replace("mean_realized_", "wealth_")] = (1.0 + df[col]) ** 3
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["score_month"], y=df["wealth_top10"], mode="lines+markers",
+        name="$1 → top-decile basket (3y hold)", line=dict(color="#1a9850", width=2),
+        hovertemplate="Entry %{x|%Y-%m}<br>Terminal: $%{y:.3f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["score_month"], y=df["wealth_universe"], mode="lines",
+        name="$1 → universe (equal-weight)", line=dict(color="#666", width=1, dash="dash"),
+        hovertemplate="Entry %{x|%Y-%m}<br>Terminal: $%{y:.3f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["score_month"], y=df["wealth_bot10"], mode="lines+markers",
+        name="$1 → bottom-decile basket (3y hold)", line=dict(color="#a50026", width=2),
+        hovertemplate="Entry %{x|%Y-%m}<br>Terminal: $%{y:.3f}<extra></extra>",
+    ))
+    fig.add_hline(y=1.0, line=dict(color="#999", width=1))
+    fig.update_yaxes(title="Terminal wealth from $1 (3-year hold)", tickformat="$.2f")
+    fig.update_xaxes(title="Cohort entry month")
+    fig.update_layout(
+        title="Per-cohort terminal wealth — $1 invested at each month, held 3 years",
+        height=420, margin=dict(l=60, r=20, t=60, b=40), legend=dict(orientation="h", y=-0.2),
+    )
+    return fig
+
+
+def chart_calibration_scatter() -> go.Figure:
+    """Predicted vs realized fwd_3y, binned into 20 quantile buckets.
+    Distinguishes a good ranker from a well-calibrated forecaster."""
+    df = _headline_test_predictions()
+    df["bin"] = pd.qcut(df["predicted"], 20, labels=False, duplicates="drop")
+    g = df.groupby("bin").agg(
+        pred_mean=("predicted", "mean"),
+        real_mean=("realized", "mean"),
+        n=("realized", "size"),
+        real_std=("realized", "std"),
+    ).reset_index()
+    lo = float(min(g["pred_mean"].min(), g["real_mean"].min()))
+    hi = float(max(g["pred_mean"].max(), g["real_mean"].max()))
+    pad = (hi - lo) * 0.05
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[lo - pad, hi + pad], y=[lo - pad, hi + pad],
+        mode="lines", line=dict(color="#999", dash="dash"), name="perfect calibration",
+        hoverinfo="skip", showlegend=True,
+    ))
+    fig.add_trace(go.Scatter(
+        x=g["pred_mean"], y=g["real_mean"], mode="markers",
+        marker=dict(size=9, color=g["bin"], colorscale="Viridis",
+                    showscale=False, line=dict(width=1, color="white")),
+        error_y=dict(type="data", array=g["real_std"] / np.sqrt(g["n"]), thickness=1),
+        name="binned (predicted, realized)",
+        customdata=np.stack([g["n"], g["bin"] + 1], axis=1),
+        hovertemplate=("Bucket %{customdata[1]}/20<br>"
+                       "Mean predicted: %{x:.2%}<br>"
+                       "Mean realized: %{y:.2%}<br>"
+                       "n=%{customdata[0]:,}<extra></extra>"),
+    ))
+    fig.update_xaxes(title="Mean predicted fwd_3y (annualized)", tickformat=".1%")
+    fig.update_yaxes(title="Mean realized fwd_3y (annualized)", tickformat=".1%")
+    fig.update_layout(
+        title="Calibration — predicted vs realized in 20 quantile buckets (post-2012 test)",
+        height=440, margin=dict(l=60, r=20, t=60, b=40), legend=dict(orientation="h", y=-0.18),
+    )
+    return fig
+
+
+def chart_quantile_fan() -> go.Figure | None:
+    """Universe-mean predicted return over time, with p10-p90 band from the quantile models."""
+    if not TIMING_PARQUET.exists():
+        return None
+    df = pd.read_parquet(TIMING_PARQUET)
+    df["year_month"] = pd.to_datetime(df["year_month"])
+    df = df.sort_values("year_month").reset_index(drop=True)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["year_month"], y=df["predicted_universe_p90"],
+        mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["year_month"], y=df["predicted_universe_p10"],
+        mode="lines", line=dict(width=0), fill="tonexty",
+        fillcolor="rgba(44, 82, 130, 0.18)",
+        name="80% prediction interval (p10–p90)",
+        hovertemplate="<b>%{x|%Y-%m}</b><br>p10: %{y:.2%}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["year_month"], y=df["predicted_universe_median"],
+        mode="lines", name="median forecast (p50)",
+        line=dict(color="#2c5282", width=2),
+        hovertemplate="<b>%{x|%Y-%m}</b><br>p50: %{y:.2%}<extra></extra>",
+    ))
+    if "realized_universe_mean" in df.columns and df["realized_universe_mean"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df["year_month"], y=df["realized_universe_mean"],
+            mode="lines", name="realized (subsequent 3y, annualized)",
+            line=dict(color="#1a9850", width=2, dash="dash"),
+            hovertemplate="<b>%{x|%Y-%m}</b><br>realized: %{y:.2%}<extra></extra>",
+        ))
+    fig.add_hline(y=0, line=dict(color="#999", width=1))
+    fig.update_yaxes(tickformat=".1%", title="Predicted universe-mean fwd_3y (annualized)")
+    fig.update_xaxes(title="Score month")
+    fig.update_layout(
+        title="Universe-mean forecast with 80% uncertainty band — quantile LightGBM",
+        height=430, margin=dict(l=60, r=20, t=60, b=40), legend=dict(orientation="h", y=-0.2),
+    )
+    return fig
+
+
+def chart_walkforward_schematic() -> go.Figure:
+    """Strip diagram of train + 1-year-test windows sliding across the calendar.
+    Communicates 'rolling origin' visually with no real data needed."""
+    folds = [
+        ("Fold 1", 2013, 2018, 2018),
+        ("Fold 2", 2013, 2019, 2019),
+        ("Fold 3", 2013, 2020, 2020),
+        ("Fold 4", 2013, 2021, 2021),
+        ("Fold 5", 2013, 2022, 2022),
+    ]
+    fig = go.Figure()
+    for label, train_start, train_end_exclusive, test_year in folds:
+        fig.add_trace(go.Bar(
+            y=[label], x=[train_end_exclusive - train_start],
+            base=[train_start], orientation="h",
+            marker_color="#5a7ec3", name="train", showlegend=(label == "Fold 1"),
+            hovertemplate=f"Train: {train_start} – {train_end_exclusive - 1}<extra></extra>",
+        ))
+        fig.add_trace(go.Bar(
+            y=[label], x=[1], base=[test_year], orientation="h",
+            marker_color="#1a9850", name="test (1y window)", showlegend=(label == "Fold 1"),
+            hovertemplate=f"Test: {test_year}<extra></extra>",
+        ))
+    fig.update_layout(
+        barmode="stack", title="Walk-forward CV — test year slides forward; train uses everything before it",
+        xaxis_title="Calendar year", yaxis_title="",
+        height=300, margin=dict(l=60, r=20, t=60, b=40),
+        legend=dict(orientation="h", y=-0.25),
+    )
+    fig.update_xaxes(dtick=1, range=[2012.5, 2023.5])
+    return fig
+
+
+def chart_spatial_fold_matrix() -> go.Figure | None:
+    """Show how the top-100 CBSAs partition into 5 disjoint folds.
+    Each dot = one CBSA, sized by population, colored by fold assignment."""
+    if TOP_METROS is None:
+        return None
+    from sklearn.model_selection import GroupKFold
+    cbsas = TOP_METROS.copy().reset_index(drop=True)
+    rng = np.random.default_rng(42)
+    shuffled = rng.permutation(cbsas["cbsa"].to_numpy())
+    fold_map = {}
+    gkf = GroupKFold(n_splits=5)
+    X = np.arange(len(shuffled)).reshape(-1, 1)
+    for i, (_, test_idx) in enumerate(gkf.split(X, groups=shuffled)):
+        for j in test_idx:
+            fold_map[shuffled[j]] = i + 1
+    cbsas["fold"] = cbsas["cbsa"].map(fold_map)
+    cbsas["state_primary"] = cbsas["state"].str.split("-").str[0]
+    cbsas["city_primary"] = cbsas["core_name"].str.split("-").str[0]
+    cbsas = cbsas.sort_values("population", ascending=False).reset_index(drop=True)
+    cbsas["rank"] = cbsas.index + 1
+    fig = go.Figure()
+    palette = {1: "#a50026", 2: "#fdae61", 3: "#5a7ec3", 4: "#1a9850", 5: "#762a83"}
+    for f in sorted(cbsas["fold"].unique()):
+        sub = cbsas[cbsas["fold"] == f]
+        fig.add_trace(go.Scatter(
+            x=sub["rank"], y=[f] * len(sub),
+            mode="markers",
+            marker=dict(size=np.sqrt(sub["population"] / 50_000),
+                        color=palette[f], opacity=0.75, line=dict(color="white", width=0.5)),
+            name=f"Fold {f}",
+            customdata=np.stack([sub["city_primary"], sub["state_primary"], sub["population"]], axis=1),
+            hovertemplate=("<b>%{customdata[0]}, %{customdata[1]}</b><br>"
+                           "Population: %{customdata[2]:,}<br>"
+                           f"Held out in fold {f}<extra></extra>"),
+        ))
+    fig.update_yaxes(title="Spatial-CV fold (held out)", dtick=1, autorange="reversed")
+    fig.update_xaxes(title="Top-100 CBSA, ranked by population (1 = NYC, 100 = smallest)")
+    fig.update_layout(
+        title="Spatial CV — each top-100 metro is held out in exactly one of five folds",
+        height=320, margin=dict(l=60, r=20, t=60, b=50),
+        legend=dict(orientation="h", y=-0.25),
+    )
+    return fig
+
+
+def chart_forward_return_illustration(anchor_str: str = "2018-01-01") -> go.Figure | None:
+    """One illustrative ZIP: ZHVI line with shaded fwd_1y/3y/5y windows from one anchor date."""
+    anchor = pd.Timestamp(anchor_str)
+    candidates = LEADERBOARD["zip"].head(5).tolist() if LEADERBOARD is not None else []
+    candidates += ["94110", "10025", "60618"]
+    chosen = None
+    for z in candidates:
+        sub = FS[(FS["zip"] == z) & FS["zhvi"].notna()].sort_values("year_month")
+        if len(sub) < 200:
+            continue
+        sub_dates = pd.to_datetime(sub["year_month"])
+        if sub_dates.min() <= anchor and sub_dates.max() >= anchor + pd.DateOffset(years=5):
+            chosen = (z, sub)
+            break
+    if chosen is None:
+        return None
+    z, sub = chosen
+    sub = sub.copy()
+    sub["year_month"] = pd.to_datetime(sub["year_month"])
+    anchor_row = sub.loc[sub["year_month"] == anchor]
+    if anchor_row.empty:
+        return None
+    anchor_zhvi = float(anchor_row["zhvi"].iloc[0])
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=sub["year_month"], y=sub["zhvi"], mode="lines",
+        line=dict(color="#2c5282", width=2),
+        name=f"ZHVI — ZIP {z}",
+        hovertemplate="<b>%{x|%Y-%m}</b><br>ZHVI: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[anchor], y=[anchor_zhvi], mode="markers+text",
+        marker=dict(size=12, color="#1a1a1a", symbol="diamond"),
+        text=[f"prediction date<br>{anchor.strftime('%Y-%m')}"],
+        textposition="bottom right", textfont=dict(size=11), showlegend=False, hoverinfo="skip",
+    ))
+    # Draw widest band first so narrower bands paint over it; layered shading
+    # lets the eye see all three windows at once (1y darkest, 5y faintest).
+    bands = [("fwd_5y", "rgba(165,0,38,.13)", 5),
+             ("fwd_3y", "rgba(44,82,130,.16)", 3),
+             ("fwd_1y", "rgba(26,152,80,.25)", 1)]
+    for name, color, years in bands:
+        fig.add_vrect(
+            x0=anchor, x1=anchor + pd.DateOffset(years=years),
+            fillcolor=color, line_width=0,
+        )
+    # Manual annotations at the right edge of each band so labels don't stack.
+    for name, _, years in bands:
+        end = anchor + pd.DateOffset(years=years)
+        fig.add_annotation(
+            x=end, y=1.0, xref="x", yref="y domain",
+            text=f"<b>{name}</b> end ({end.strftime('%Y-%m')})",
+            showarrow=False, font=dict(size=11, color="#444"),
+            xanchor="right", yanchor="bottom", yshift=2,
+        )
+    fig.add_vline(x=anchor, line=dict(color="#1a1a1a", width=1, dash="dot"))
+    fig.update_yaxes(title="ZHVI ($)", tickformat="$,.0f")
+    fig.update_xaxes(title="Month")
+    fig.update_layout(
+        title=f"What 'forward return' means — example: ZIP {z}",
+        height=380, margin=dict(l=60, r=20, t=60, b=40), showlegend=False,
+    )
+    return fig
+
+
+def chart_shap_waterfall(horizon: str = "fwd_3y", split: str = "post_2012",
+                         k: int = 10) -> tuple[go.Figure | None, go.Figure | None]:
+    """Two waterfalls: one for a top-decile and one for a bottom-decile pick at the
+    most recent scoring month — the k features with the largest |SHAP| contribution."""
+    booster = lgb.Booster(model_file=str(ARTIFACTS / f"{horizon}__{split}__lgbm.txt"))
+    features = (ARTIFACTS / f"{horizon}__{split}__lgbm.features.txt").read_text().strip().split("\n")
+    df = _headline_test_predictions(horizon, split)
+    if df.empty:
+        return None, None
+    latest = df["year_month"].max()
+    df = df[df["year_month"] == latest].copy()
+    if df.empty:
+        return None, None
+    top_row = df.loc[df["predicted"].idxmax()]
+    bot_row = df.loc[df["predicted"].idxmin()]
+
+    train_mask = FS[f"is_train_{split}"].fillna(False)
+    med = FS.loc[train_mask, features].median(numeric_only=True)
+    explainer = shap.TreeExplainer(booster)
+
+    def _build(row, label_color):
+        mask = (FS["zip"] == row["zip"]) & (FS["year_month"] == row["year_month"])
+        X_one = FS.loc[mask, features].copy()
+        if X_one.empty:
+            return None
+        X_one = X_one.fillna(med)
+        sv = explainer.shap_values(X_one)
+        if isinstance(sv, list):
+            sv = sv[0]
+        contrib = sv[0]
+        base = float(explainer.expected_value if np.isscalar(explainer.expected_value)
+                     else explainer.expected_value[0])
+        order = np.argsort(np.abs(contrib))[::-1][:k]
+        top_feats = [features[i] for i in order]
+        top_vals = [float(contrib[i]) for i in order]
+        top_x = [float(X_one.iloc[0][f]) for f in top_feats]
+        idx = np.argsort(top_vals)
+        top_feats = [top_feats[i] for i in idx]
+        top_vals = [top_vals[i] for i in idx]
+        top_x = [top_x[i] for i in idx]
+        display = [feat_label(f)[0] for f in top_feats]
+        descrip = [feat_label(f)[1] for f in top_feats]
+        bar_colors = ["#1a9850" if v > 0 else "#a50026" for v in top_vals]
+
+        fig = go.Figure(go.Bar(
+            x=top_vals, y=display, orientation="h",
+            marker_color=bar_colors,
+            text=[f"{v:+.4f}" for v in top_vals], textposition="outside",
+            customdata=np.stack([top_feats, descrip, top_x], axis=1),
+            hovertemplate=("<b>%{y}</b><br>"
+                           "<i>%{customdata[0]}</i><br>"
+                           "feature value at this ZIP: %{customdata[2]:.4f}<br>"
+                           "SHAP contribution: %{x:+.4f}<br><br>"
+                           "%{customdata[1]}<extra></extra>"),
+        ))
+        fig.add_vline(x=0, line=dict(color="#666", width=1))
+        title = (f"ZIP {row['zip']} · CBSA {row['cbsa']} · "
+                 f"{pd.Timestamp(row['year_month']).strftime('%Y-%m')}<br>"
+                 f"<span style='color:{label_color};font-size:13px'>"
+                 f"predicted fwd_3y ann. = {row['predicted']*100:+.2f}%, "
+                 f"realized = {row['realized']*100:+.2f}%, "
+                 f"model base rate = {base*100:+.2f}%</span>")
+        fig.update_xaxes(title="Per-feature SHAP contribution (log-return units)", tickformat="+.3f")
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=14)),
+            height=420, margin=dict(l=240, r=80, t=80, b=40), showlegend=False,
+        )
+        return fig
+
+    return _build(top_row, "#1a9850"), _build(bot_row, "#a50026")
 
 
 def main() -> None:
@@ -912,6 +1352,14 @@ def main() -> None:
     else:
         hd_spread = hd_top = hd_bot = float("nan")
 
+    # Headline fwd_3y post_2012 LightGBM Spearman — used in section 1a copy for the
+    # "did walk-forward survive the static result?" comparison.
+    lgbm3 = RESULTS[
+        (RESULTS["split"] == "post_2012") & (RESULTS["horizon"] == "fwd_3y")
+        & (RESULTS["model"] == "lightgbm")
+    ]
+    static_fwd3y_spearman = float(lgbm3["spearman"].iloc[0]) if not lgbm3.empty else float("nan")
+
     # Leaderboard band width stats
     band = leaderboard_band_stats()
     band_p10 = band["median_p10"] * 100
@@ -922,11 +1370,13 @@ def main() -> None:
     # to 8 MB by inlining the Leaflet bundle.
     map_path = PROCESSED / "zip_decile_map.html"
     if map_path.exists():
+        # Cache-bust both the link and the iframe so GitHub Pages' CDN doesn't
+        # serve stale map HTML to returning visitors on a new build day.
         map_link_html = (
             "<p>Hover any zip for ZIP code, metro, ZHVI, predicted fwd_3y return, and decile rank. "
             "Drag to pan; scroll to zoom. "
-            "<a href='zip_decile_map.html' target='_blank'>Open the map full-screen ↗</a></p>"
-            "<iframe src='zip_decile_map.html' "
+            f"<a href='zip_decile_map.html?v={BUILD_DATE}' target='_blank'>Open the map full-screen ↗</a></p>"
+            f"<iframe src='zip_decile_map.html?v={BUILD_DATE}' "
             "style='width:100%; height:600px; border:1px solid #ccc; border-radius:4px;' "
             "loading='lazy' title='ZIP decile map'></iframe>"
         )
@@ -935,7 +1385,10 @@ def main() -> None:
 
     # Backtest: time-series chart + summary table + headline stats for TL;DR
     backtest_chart_fig = chart_backtest_chart()
-    backtest_chart_html = _div(backtest_chart_fig, include_js=False) if backtest_chart_fig is not None else "<p><i>Backtest not yet built.</i></p>"
+    backtest_chart_html = _div(
+        backtest_chart_fig, include_js=False,
+        aria_label="Time-series line chart: top-decile basket vs universe mean vs bottom-decile basket realized fwd_3y returns by score month",
+    ) if backtest_chart_fig is not None else "<p><i>Backtest not yet built.</i></p>"
     backtest_table_html = chart_backtest_summary_table()
     bt = backtest_summary_stats()
     bt_price_hit = bt["price"]["hit"]
@@ -951,11 +1404,15 @@ def main() -> None:
 
     # Personal-overlay fragment (section 8)
     overlay_section_html = OVERLAY_HTML if OVERLAY_HTML else "<p><i>Personal overlay not yet built.</i></p>"
+    owner_occ_concentration = owner_occupier_concentration_stat()
 
     # --- 5b · Macro context ------------------------------------------------
     timing_fig = chart_timing_universe_mean()
     if timing_fig is not None:
-        timing_chart_html = _div(timing_fig, include_js=False)
+        timing_chart_html = _div(
+            timing_fig, include_js=False,
+            aria_label="Time series line chart: universe-mean predicted fwd_3y vs subsequent realized fwd_3y, post-2012 LightGBM",
+        )
     else:
         timing_chart_html = ("<p class='caveat'>Timing chart not built yet — "
                              "run <code>python scripts/macro_context.py</code>.</p>")
@@ -984,7 +1441,10 @@ def main() -> None:
     hedge_trail_html = hedge_trailing_table()
     hedge_fig = chart_hedge_comparison()
     if hedge_fig is not None:
-        hedge_chart_html = _div(hedge_fig, include_js=False)
+        hedge_chart_html = _div(
+            hedge_fig, include_js=False,
+            aria_label="Log-scale cumulative real return per asset since 2000: residential RE vs S&P 500, gold, REITs, and Bitcoin",
+        )
     else:
         hedge_chart_html = ("<p class='caveat'>Hedge chart not built yet — "
                             "run <code>python scripts/macro_context.py</code>.</p>")
@@ -1013,11 +1473,95 @@ def main() -> None:
         zhvi_3y_median = float("nan")
     n_assets = len(hedge_summary.get("medians", [])) or 0
 
+    # --- Extra explanatory visuals -----------------------------------------
+    # NOTE: fwd_illus is the FIRST Plotly chart rendered in the body, so it
+    # carries the inlined Plotly.js bundle (~3 MB). All other _div() calls in
+    # this report set include_js=False and share that bundle. Inlining (rather
+    # than CDN) makes the report robust to CDN outages / network filters at the
+    # cost of file size; if size becomes a problem the fallback is to flip
+    # include_js=True back to 'cdn' here and add a noscript CDN-failure warning.
+    # `js_inlined` tracks whether some earlier _div() has already shipped the
+    # Plotly bundle; if fwd_illus_fig falls through to the placeholder text,
+    # the next chart (decile, section 3) picks up the responsibility.
+    js_inlined = False
+    print("  · forward-return illustration")
+    fwd_illus_fig = chart_forward_return_illustration()
+    if fwd_illus_fig is not None:
+        fwd_illus_html = _div(
+            fwd_illus_fig, include_js=True,
+            aria_label="Illustrative ZIP ZHVI line chart with shaded fwd_1y, fwd_3y, and fwd_5y forward windows from a single anchor date",
+        )
+        js_inlined = True
+    else:
+        fwd_illus_html = "<p class='caveat'>Forward-return illustration unavailable (no ZIP with enough history).</p>"
+    print("  · walk-forward schematic")
+    wf_schematic_html = _div(
+        chart_walkforward_schematic(), include_js=False,
+        aria_label="Schematic of walk-forward cross-validation: five folds with sliding train and one-year test windows",
+    )
+    print("  · spatial-CV fold matrix")
+    sp_fold_fig = chart_spatial_fold_matrix()
+    sp_fold_html = _div(
+        sp_fold_fig, include_js=False,
+        aria_label="Scatter of top-100 CBSAs colored by spatial-CV fold assignment; bubble size encodes metro population",
+    ) if sp_fold_fig is not None else ""
+    print("  · equity curve")
+    eq_curve_fig = chart_equity_curve()
+    eq_curve_html = _div(
+        eq_curve_fig, include_js=False,
+        aria_label="Per-cohort terminal wealth from $1 invested in the top-decile basket, universe, and bottom-decile basket held for 3 years",
+    ) if eq_curve_fig is not None else ""
+    print("  · calibration scatter")
+    calib_html = _div(
+        chart_calibration_scatter(), include_js=False,
+        aria_label="Calibration scatter: mean predicted fwd_3y vs mean realized fwd_3y across 20 quantile bins on the post-2012 test set",
+    )
+    print("  · decile curve")
+    decile_curve_html = _div(
+        chart_decile_curve(), include_js=False,
+        aria_label="Realized fwd_3y annualized return by predicted decile, post-2012 LightGBM",
+    )
+    print("  · SHAP waterfalls (top + bot example ZIPs)")
+    shap_top_fig, shap_bot_fig = chart_shap_waterfall()
+    shap_top_html = _div(
+        shap_top_fig, include_js=False,
+        aria_label="SHAP waterfall chart for the highest-predicted ZIP at the latest scoring month",
+    ) if shap_top_fig is not None else ""
+    shap_bot_html = _div(
+        shap_bot_fig, include_js=False,
+        aria_label="SHAP waterfall chart for the lowest-predicted ZIP at the latest scoring month",
+    ) if shap_bot_fig is not None else ""
+    print("  · quantile fan")
+    fan_fig = chart_quantile_fan()
+    fan_html = _div(
+        fan_fig, include_js=False,
+        aria_label="Universe-mean fwd_3y median forecast with 80% prediction band from quantile LightGBM models",
+    ) if fan_fig is not None else ""
+
+    page_title = "arbok — what predicts US residential real-estate returns?"
+    og_description = (
+        "A quant study of what predicts US residential real-estate returns: "
+        "3.73M-row zip-month panel, 140+ free public predictors across 11 "
+        "thematic classes, LightGBM + SHAP attribution, backtested 2018-2021."
+    )[:200]
+
     html = f"""<!DOCTYPE html>
 <html lang='en'>
 <head>
   <meta charset='utf-8'>
-  <title>arbok — what predicts US residential real-estate returns?</title>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>{escape(page_title)}</title>
+  <link rel='icon' href='assets/favicon.svg?v={BUILD_DATE}' type='image/svg+xml'>
+  <meta name='description' content="{escape(og_description)}">
+  <meta property='og:type' content='article'>
+  <meta property='og:title' content="{escape(page_title)}">
+  <meta property='og:description' content="{escape(og_description)}">
+  <meta property='og:image' content='assets/og-image.png?v={BUILD_DATE}'>
+  <meta property='og:url' content='{escape(SITE_URL)}'>
+  <meta name='twitter:card' content='summary_large_image'>
+  <meta name='twitter:title' content="{escape(page_title)}">
+  <meta name='twitter:description' content="{escape(og_description)}">
+  <meta name='twitter:image' content='assets/og-image.png?v={BUILD_DATE}'>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
             max-width: 1100px; margin: 2em auto; color: #1a1a1a; padding: 0 1em;
@@ -1039,31 +1583,66 @@ def main() -> None:
     table.leaderboard {{ font-family: ui-monospace, 'SF Mono', monospace;
                          font-size: .82em; }}
     table.leaderboard td:nth-child(6) {{ font-weight: bold; color: #2c5282; }}
-    table.leaderboard span[title] {{ border-bottom: 1px dotted #999; cursor: help; }}
+    /* Tooltips: keep the dotted-underline affordance, but also make the title
+       text discoverable on touch / keyboard via a focusable wrapper. The
+       inline <span title='...'> elements emitted by _humanize_drivers() are
+       turned into <span tabindex='0' class='tt'> with the description in a
+       sibling .tt-body — see _humanize_drivers below. */
+    table.leaderboard span.tt {{ position: relative; border-bottom: 1px dotted #999;
+                                 cursor: help; outline: none; }}
+    table.leaderboard span.tt .tt-body {{
+        display: none; position: absolute; left: 0; top: 1.4em; z-index: 30;
+        background: #1a1a1a; color: #fff; padding: .45em .65em;
+        border-radius: 4px; font-size: .82em; line-height: 1.35;
+        max-width: 22em; white-space: normal;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        box-shadow: 0 2px 6px rgba(0,0,0,.25);
+    }}
+    /* Hover (mouse), focus (keyboard), focus-within (taps that activate
+       the wrapper) — any one of them reveals the tooltip body. */
+    table.leaderboard span.tt:hover .tt-body,
+    table.leaderboard span.tt:focus .tt-body,
+    table.leaderboard span.tt:focus-within .tt-body {{ display: block; }}
     .meta {{ color: #666; font-size: .9em; margin-bottom: 1.8em; }}
-    .tldr {{ background: #f3f5f9; border-left: 4px solid #2c5282;
-             padding: 1em 1.4em; margin: 1.5em 0; border-radius: 0 4px 4px 0; }}
-    .tldr h3 {{ margin-top: 0; color: #2c5282; }}
+    .summary {{ background: #f3f5f9; border-left: 4px solid #2c5282;
+                padding: 1em 1.4em; margin: 1.5em 0; border-radius: 0 4px 4px 0; }}
+    .summary h3 {{ margin-top: 0; color: #2c5282; }}
+    .primer {{ background: #f8f9fb; border: 1px solid #e0e6ef;
+               padding: 1em 1.4em; margin: 1.5em 0; border-radius: 4px;
+               font-size: .94em; }}
+    .primer h3 {{ margin-top: 0; color: #2c5282; }}
+    .primer dt {{ font-weight: 600; margin-top: .55em; }}
+    .primer dd {{ margin: 0 0 .2em 0; }}
     .caveat {{ background: #fff8e6; border-left: 4px solid #c9a227;
                padding: .9em 1.2em; margin: 1.2em 0; font-size: .93em;
                border-radius: 0 4px 4px 0; }}
-    .glossary dt {{ font-weight: 600; margin-top: .8em; color: #2c5282;
-                    font-family: ui-monospace, 'SF Mono', monospace; }}
-    .glossary dd {{ margin: .2em 0 .2em 1.5em; }}
     code {{ background: #f3f5f9; padding: 1px 5px; border-radius: 3px;
             font-size: .9em; }}
     .footnote {{ color: #666; font-size: .85em; margin-top: 3em;
                  border-top: 1px solid #eee; padding-top: 1em; }}
+    .nojs-banner {{ background: #fff8e6; border-left: 4px solid #c9a227;
+                    padding: .9em 1.2em; margin: 1em 0; font-size: .93em;
+                    border-radius: 0 4px 4px 0; }}
     ul {{ margin: .4em 0; }}
     li {{ margin: .2em 0; }}
+    /* Make wrapped tables look unchanged on desktop but scroll horizontally
+       on narrow screens instead of busting the page width. */
+    div[style*='overflow-x:auto'] {{ -webkit-overflow-scrolling: touch; }}
   </style>
 </head>
 <body>
+  <noscript>
+    <div class='nojs-banner'>
+      <b>Interactive charts require JavaScript.</b> The data tables and the
+      written analysis in each section will still render without it; the
+      hover-tooltips and Plotly visualisations will not.
+    </div>
+  </noscript>
   <h1>What predicts US residential real-estate returns?</h1>
-  <p class='meta'>arbok study · generated 2026-05-22 · all data from free / public sources</p>
+  <p class='meta'>arbok study · generated {BUILD_DATE} · all data from free / public sources</p>
 
-  <div class='tldr'>
-    <h3>TL;DR</h3>
+  <div class='summary'>
+    <h3>Executive summary</h3>
     <ul>
       <li>Built a 3.73-million-row panel of every zip code in the top 100 US metros, monthly, 2000-2026,
           joined with 140+ candidate predictors organized into 11 thematic classes (macro, demographics,
@@ -1083,7 +1662,7 @@ def main() -> None:
           {ts_month} is <b>{ts_current*100:+.2f}%</b> — that sits at the
           <b>{ts_pct:.0f}th percentile</b> of the post-2012 history (median +{ts_med*100:.2f}%).
           Verdict: <b>{ts_verdict}</b> vs historical baseline. The model is saying "wait, or pick
-          carefully" rather than "buy the index". See section 5b.</li>
+          carefully" rather than "buy the index". See section 6.</li>
       <li><b>Real estate vs other inflation hedges (median 3y real return, 2000-now, unlevered):</b>
           Bitcoin and gold lead (+10% to +66% depending on selection bias); broad equity and REITs
           mid-pack; <b>US residential RE comes last at ~+3.5%</b>. Trailing 3 years through {ts_month}
@@ -1109,6 +1688,59 @@ def main() -> None:
     </ul>
   </div>
 
+  <div class='primer'>
+    <h3>How to read this report (a 60-second primer)</h3>
+    <p>This report uses some specialized terms repeatedly. The shortest possible definitions:</p>
+    <dl>
+      <dt>ZIP / metro (CBSA)</dt>
+      <dd>A ZIP code is a USPS postal area (~22,000 across the US). A "metro" — Census's Core-Based
+          Statistical Area or <b>CBSA</b> — is a grouping of nearby ZIPs that share a labor market
+          (e.g., the "Washington, DC metro" spans into Virginia and Maryland suburbs). We restrict
+          to the top 100 metros by population.</dd>
+      <dt>Forward return (fwd_1y, fwd_3y, fwd_5y)</dt>
+      <dd>"fwd_3y" is the price change of a typical home in a ZIP over the next 3 years,
+          annualized to a yearly rate. The model predicts these forward returns using only
+          information available <i>at the start</i> of the holding period — no peeking ahead.</dd>
+      <dt>ZHVI / ZORI</dt>
+      <dd>Zillow's monthly Home Value Index (the price level we predict) and Observed Rent Index
+          (used in the yield-aware variant of the model).</dd>
+      <dt>LightGBM, ElasticNet, "hedonic"</dt>
+      <dd>Three models we train and compare. <b>LightGBM</b> is a gradient-boosted decision-tree
+          model — the standard machine-learning workhorse for tabular data; it captures non-linear
+          patterns and feature interactions. <b>ElasticNet</b> is a regularized linear regression
+          — interpretable but less flexible. <b>Hedonic</b> is the textbook real-estate-economics
+          method: a regression using just demographic features (Census ACS basics). LightGBM is the
+          headline model; the other two are baselines a real model has to beat.</dd>
+      <dt>SHAP</dt>
+      <dd>For each prediction, SHAP attributes a contribution to every input feature ("this ZIP
+          scored high because real interest rates pushed it down by X and ACS demographics pushed
+          it up by Y"). Top-SHAP features tell us what the model relies on most.</dd>
+      <dt>Spearman ρ (rho)</dt>
+      <dd>A rank correlation: did the model order ZIPs correctly from worst-to-best forward return?
+          +1 = perfect ordering, 0 = random, −1 = perfectly backwards. +0.3 is meaningful for noisy
+          financial data.</dd>
+      <dt>Decile spread</dt>
+      <dd>The realized return of the 10% of ZIPs the model ranked highest, minus the 10% it ranked
+          lowest. The bottom-line "would picking this model's top zips have helped?" number.</dd>
+      <dt>Backtest</dt>
+      <dd>Replay history. At each past month, we run the model on data available <i>then</i>,
+          take its top-decile picks, and check what those ZIPs actually returned 3 years later.
+          The most honest evaluation of "did this work in practice?".</dd>
+      <dt>Walk-forward CV, spatial CV</dt>
+      <dd>Two ways of stress-testing the model beyond a single train/test split. <b>Walk-forward</b>
+          slides the training cutoff year-by-year so we get a range of out-of-sample numbers rather
+          than one experiment. <b>Spatial</b> holds out entire metros (not just months), making sure
+          the model's signal isn't leaking through neighboring ZIPs in the same metro.</dd>
+      <dt>Real rate (10Y TIPS yield)</dt>
+      <dd>The interest rate on inflation-protected Treasury bonds — the "true" cost of capital after
+          inflation. Higher real rates make borrowing more expensive and depress home prices; the
+          single biggest macro driver in the model.</dd>
+      <dt>Drawdown</dt>
+      <dd>How far a ZIP's price index is below its trailing-5-year peak. Drawdown is what the model
+          calls "this ZIP has fallen X% from its recent high" — a clean mean-reversion signal.</dd>
+    </dl>
+  </div>
+
   <h2>Why this study exists</h2>
   <p>Residential real estate is the largest asset class most people will ever own, and the conventional
      wisdom for picking <i>where</i> and <i>when</i> to buy is dominated by qualitative heuristics
@@ -1127,6 +1759,11 @@ def main() -> None:
   <p>For each zip code at each month, we compute the forward home-price return (Zillow ZHVI index) over
      three horizons — 1 year, 3 years, 5 years — annualized for the latter two. These are the
      <i>targets</i> our models try to learn from upstream features.</p>
+  <p>The chart below illustrates what those forward windows look like for a single real ZIP.
+     The diamond marks an example "prediction date"; the three shaded windows are the 1-, 3-, and
+     5-year forward periods we score the model against. <i>Predict-only-on-what-you-knew-at-time-t,
+     score-on-what-actually-happened-by-time-t+h</i> is the discipline that makes the backtest honest.</p>
+  {fwd_illus_html}
 
   <h3>How we predict it</h3>
   <p>For each (zip, month) row, we join a wide set of features that were <i>knowable at that time</i>
@@ -1145,9 +1782,9 @@ def main() -> None:
   <p>Two temporal splits, both reported in this run:</p>
   <ul>
     <li><b>pre_2008 split:</b> train on data through 2007-12, test on 2008-2013. Stress-tests
-        whether the model breaks across the housing-crisis regime change.</li>
+        whether the model breaks across the 2008 housing crisis (the "GFC" — Global Financial Crisis).</li>
     <li><b>post_2012 split:</b> train through 2017-12, test on 2018-2024. Stress-tests across the
-        2022 rate shock + COVID demand surge.</li>
+        Fed's 2022 rate hike cycle (the "rate shock") and the COVID-era demand surge.</li>
   </ul>
   <p>This run additionally reports <b>spatial cross-validation</b> (hold out entire CBSAs) and
      <b>walk-forward CV</b> (rolling 12-month test windows) on top of the two static splits — see
@@ -1198,16 +1835,6 @@ def main() -> None:
      order-of-magnitude spread — is much harder to dismiss as overfitting to one regime.</p>
   {headline_html}
 
-  <h3>How to read this</h3>
-  <ul>
-    <li><b>Spearman ρ</b> measures rank correlation: did the model order zips correctly from worst-
-        to best-expected return? Range -1 (perfectly anti-ranked) to +1 (perfectly ranked).
-        +0.3 is meaningful for noisy financial data.</li>
-    <li><b>Decile spread</b> is the most actionable metric: if you bought zips the model ranked in
-        the top 10% versus the bottom 10%, how much better did you do? +6.75% means the top decile
-        averaged 9.70% annualized vs. 2.95% in the bottom — a meaningful gap.</li>
-  </ul>
-
   <div class='caveat'>
     <b>Why R² is not reported as the primary metric:</b> traditional R² is negative on both test windows
     for nearly every model. This is not a model failure — it's a property of the test windows. Both
@@ -1224,18 +1851,27 @@ def main() -> None:
   <h3>1a · Walk-forward CV (rolling-origin)</h3>
   <p>Train through year T−1, test on year T; roll the cutoff from 2018-12 through 2022-12. Five
      test years per horizon (fewer for fwd_5y, which would need observability beyond the panel's
-     end).</p>
+     end). The schematic below shows the sliding window: each row is one fold, blue is the training
+     range, green is the held-out test year.</p>
+  {wf_schematic_html}
   {walkforward_html}
   <p>For the headline fwd_3y horizon, mean Spearman ρ = <b>{wf3_mean:+.3f}</b> with std
-     <b>{wf3_std:.3f}</b> across {wf3_n} folds — the +0.29 figure from the single static split
-     survives in expectation (it actually rises slightly), but with meaningful year-to-year noise.
-     2020 is the variance driver, as expected.</p>
+     <b>{wf3_std:.3f}</b> across {wf3_n} folds — the <b>+{static_fwd3y_spearman:.3f}</b> figure
+     from the single static post-2012 split survives in expectation (the walk-forward average is
+     in fact slightly higher), but with meaningful year-to-year noise. 2020 is the variance driver,
+     as expected.</p>
 
   <h3>1b · Spatial CV (whole-CBSA holdout)</h3>
   <p>5-fold CBSA holdout, with train+test both restricted to ≤ 2017-12 so the only stressor is the
      spatial axis (no temporal regime shift). Two variants: the <b>raw</b> model predicts the price
-     return directly; the <b>demeaned</b> model predicts the within-metro residual after subtracting
-     per-CBSA per-month means.</p>
+     return directly; the <b>demeaned</b> model predicts the within-metro residual — i.e., the model
+     is given each ZIP's return after subtracting the average return of every other ZIP in the same
+     metro that month. That isolates "can the model rank ZIPs <i>inside</i> a metro?" from the easier
+     question "can the model tell expensive metros from cheap ones?".</p>
+  <p>The plot below shows the actual partition: every top-100 metro is assigned to exactly one
+     of five folds (color), and in each fold's evaluation pass only that fold's metros are
+     held out for testing. Bubble size = metro population.</p>
+  {sp_fold_html}
   <h4>Raw fwd_3y</h4>
   {spatial_raw_html}
   <h4>Demeaned (within-metro residual) fwd_3y</h4>
@@ -1248,41 +1884,93 @@ def main() -> None:
      zip <i>inside</i> a given metro?"</p>
 
   <h2>2 · Did this actually work? — portfolio backtest</h2>
-  <p>The single most decision-relevant question: if you had used this model's monthly rankings to
-     buy a basket of zips each month from 2018-01 through 2021-12 and held 3 years, what would you
-     have made? We replay that exercise: at every score month, build the model's top-decile basket
-     of zips, look up their <i>realized</i> fwd_3y annualized return three years later, compare to
-     the universe mean (equal-weight benchmark) and the bottom decile.</p>
+  <p>The most decision-relevant question. We replay history: at each month from 2018-01 through
+     2021-12, we run the model with only the data it could have seen at that time, take its
+     top-decile picks (a "basket" of about 1,000 ZIPs), and look up what those ZIPs actually
+     returned 3 years later. Compare to the universe mean (equal-weight all ZIPs — what you'd
+     have gotten if you bought a uniform slice of the country) and to the bottom-decile basket.
+     <b>Alpha</b>, in this context, is the basket's excess annualized return over the universe
+     mean — the "value added" by picking instead of buying everything.</p>
   {backtest_chart_html}
   {backtest_table_html}
   <p><b>The model adds skill.</b> The price-only fwd_3y headline model's top decile beat the
      universe mean in <b>{bt_price_hit:.1f}%</b> of months ({bt_price_n}/{bt_price_n}), earning
-     roughly <b>+{bt_price_excess:.2f} pp/yr</b> alpha and a <b>+{bt_price_spread:.2f} pp/yr</b>
-     top-vs-bottom spread. Worst stretch was a handful of trivial misses in mid-2021. The yield-aware
-     <code>fwd_3y_total</code> model is in another class — <b>{bt_total_hit:.1f}%</b> hit rate,
-     <b>+{bt_total_excess:.2f} pp/yr</b> alpha, <b>+{bt_total_spread:.2f} pp/yr</b> top-bot spread —
-     but caveat: its scoring universe is much smaller (only zips with ZORI rent coverage, ~1.7-2.8K
-     vs ~9.9K). The total-return alpha is real but concentrated in yield-observable metros.</p>
+     roughly <b>+{bt_price_excess:.2f} percentage points per year</b> alpha and a
+     <b>+{bt_price_spread:.2f} pp/yr</b> top-vs-bottom spread. Worst stretch was a handful of
+     trivial misses in mid-2021. The yield-aware <code>fwd_3y_total</code> model is in another
+     class — <b>{bt_total_hit:.1f}%</b> hit rate, <b>+{bt_total_excess:.2f} pp/yr</b> alpha,
+     <b>+{bt_total_spread:.2f} pp/yr</b> top-bot spread — but caveat: its scoring universe is much
+     smaller (only ZIPs where Zillow publishes rent data, ~1.7-2.8K vs ~9.9K). The total-return
+     alpha is real but concentrated in yield-observable metros.</p>
+
+  <h3>2a · Per-cohort wealth: $1 in, $? out after 3 years</h3>
+  <p>The same backtest expressed as terminal wealth. For each entry month, $1 invested in the
+     top-decile basket, the universe, or the bottom-decile basket is compounded forward for the
+     full 3-year hold. Anything above the gray $1 line is a positive real-money outcome for that
+     cohort.</p>
+  {eq_curve_html}
+
+  <h3>2b · Calibration — is the model a good ranker, a good forecaster, or both?</h3>
+  <p>A model can rank ZIPs correctly (high Spearman, healthy decile spread) yet still be
+     mis-calibrated — predicting +3% when realized averages +7%, for instance. We bin every
+     test-set prediction into 20 quantile buckets and plot mean predicted vs mean realized in
+     each bucket. Points on the dashed line are perfectly calibrated; points above the line
+     mean the model was too pessimistic at that prediction level, below means too optimistic.</p>
+  {calib_html}
+  <p>The cloud's <i>slope</i> is the rank quality (steeper = stronger ranking); the cloud's
+     <i>shift</i> relative to the diagonal is the calibration error. A model can have a steep
+     slope but sit far below the diagonal — useful for picking but biased in level. That
+     pattern is exactly what we'd expect in a regime-shift test window like post-2012, and is
+     why R² is not the headline metric here.</p>
 
   <h2>3 · Decile spread, every model × horizon × split</h2>
   <p>Each bar is one model on one horizon on one test window. Positive values mean the model's top-decile
      picks beat its bottom-decile picks; negative values mean it anti-ranked. The left panel is the
      pre-2008 split (smaller and noisier); the right is post-2012 (the main result).</p>
-  {_div(decile, include_js=True)}
+  {_div(decile, include_js=(not js_inlined), aria_label="Decile-spread bar chart by horizon (fwd_1y, fwd_3y, fwd_5y) across pre-2008 and post-2012 splits, grouped by model")}
+
+  <h3>3a · Realized return by predicted decile (headline horizon × split)</h3>
+  <p>The chart above collapses each (model, horizon, split) into a single "top minus bottom"
+     number. The one below zooms into the headline (post-2012 LightGBM, fwd_3y) and shows the
+     realized return of <i>every</i> decile, not just the extremes. A monotone climb from
+     decile 1 → decile 10 is the strong-form claim: the model is ordering ZIPs, not just
+     separating the very best from the very worst.</p>
+  {decile_curve_html}
+
   <p>LightGBM wins decisively on the medium and long horizons in the post-2012 split. On the 1-year
-     horizon, the demographics-only hedonic baseline (Ridge regression on ACS variables) actually edges
-     LightGBM — a useful sanity check that fancy methods aren't always required.</p>
+     horizon, the demographics-only hedonic baseline (a simple linear regression using only Census
+     ACS variables — household income, education, age mix, etc.) actually edges LightGBM. That's a
+     useful sanity check: fancy machine-learning methods aren't always required, and when a simple
+     baseline ties a sophisticated model, the signal probably comes from the data more than the
+     algorithm.</p>
 
   <h2>4 · What did the model learn? — SHAP feature importance</h2>
   <p>For each horizon, we compute mean absolute SHAP value per feature on the training sample. SHAP
      decomposes each prediction into per-feature contributions (positive = pushed the prediction up,
      negative = down). The bars below show the 15 features that the LightGBM model used most heavily.</p>
   <h3>Short horizon (1 year)</h3>
-  {_div(shap_figs[0], include_js=False)}
+  {_div(shap_figs[0], include_js=False, aria_label="Top-15 SHAP feature importance bar chart for fwd_1y at the post_2012 split")}
   <h3>Medium horizon (3 years)</h3>
-  {_div(shap_figs[1], include_js=False)}
+  {_div(shap_figs[1], include_js=False, aria_label="Top-15 SHAP feature importance bar chart for fwd_3y at the post_2012 split")}
   <h3>Long horizon (5 years)</h3>
-  {_div(shap_figs[2], include_js=False)}
+  {_div(shap_figs[2], include_js=False, aria_label="Top-15 SHAP feature importance bar chart for fwd_5y at the post_2012 split")}
+
+  <h3>4a · Per-ZIP attribution — why this ZIP, not that one?</h3>
+  <p>The aggregate SHAP charts above answer "which features does the model rely on, on average?"
+     The two waterfalls below answer the more decision-relevant version of that question:
+     <i>for this specific ZIP, which features pushed its predicted return up or down, and by
+     how much?</i> Green bars push the prediction higher than the model's base rate; red bars
+     push it lower. The two examples are the highest-predicted and lowest-predicted ZIPs at the
+     most recent scoring month.</p>
+  <h4>Top-decile example</h4>
+  {shap_top_html}
+  <h4>Bottom-decile example</h4>
+  {shap_bot_html}
+  <p>The pattern that recurs across nearly every top-decile ZIP: a large positive contribution from
+     the drawdown feature (this ZIP is depressed relative to its 5-year peak), combined with a
+     uniform negative contribution from the 10Y real rate (rates are elevated for everyone right
+     now). Bottom-decile ZIPs typically show the opposite: little to no drawdown, plus a stack
+     of negative contributions from demographic or migration features.</p>
 
   <p><b>Four findings worth flagging:</b></p>
   <ul>
@@ -1321,7 +2009,7 @@ def main() -> None:
      secretly a price-mean-reversion proxy (which would show a strong spread in the cheap tier and
      collapse near zero in the expensive one).</p>
 
-  <h2>5b · Macro context: is now a good time? And how does RE stack up against other hedges?</h2>
+  <h2>6 · Macro context: is now a good time? And how does RE stack up against other hedges?</h2>
   <p>Everything up to here is about <i>where</i> to buy. The two questions below are about
      <i>when</i> and <i>what else</i>: does the model think the broad RE universe is cheap or
      expensive right now, and how has private-RE actually fared against the other classic
@@ -1354,12 +2042,29 @@ def main() -> None:
     of the model, not a forecast of the future.
   </div>
 
+  <h4>How wide is the model's uncertainty over time?</h4>
+  <p>The point forecast above hides the model's own uncertainty. Three separate LightGBM models
+     trained at the 10th, 50th, and 90th conditional quantiles produce an 80% prediction band
+     around the median. The shaded region below is that band. When the band is narrow, the
+     model is confident; when it widens, it is hedging.</p>
+  {fan_html}
+
   <h3>Real estate vs other inflation hedges</h3>
-  <p>RE is rarely held in isolation in a real portfolio — the question of "is now a good time
-     to buy a house" is really "is RE the best use of the marginal dollar right now". We assemble
-     a small benchmark set of public assets that are commonly framed as inflation hedges and put
-     them on the same chart, in <i>real</i> terms (after subtracting CPI growth over the same
-     window).</p>
+  <p>Real estate is rarely held in isolation in a real portfolio — the question "is now a good
+     time to buy a house" is really "is real estate the best use of the marginal dollar right now".
+     We assemble a small benchmark set of public assets that are commonly framed as <b>inflation
+     hedges</b> (assets people buy when they worry their cash will lose purchasing power) and put
+     them on the same chart, in <b>real</b> terms — meaning after subtracting the rate of inflation
+     (CPI, the government's headline Consumer Price Index) over the same holding period. A 5%
+     nominal return during a year of 3% inflation is a 2% real return.</p>
+  <p>The benchmark set: the S&amp;P 500 and total US stock market (broad equities), publicly-traded
+     <b>REITs</b> (Real Estate Investment Trusts — companies that own large commercial /
+     residential portfolios and trade like stocks), gold, 10-year TIPS, and Bitcoin (despite its
+     short history). All compared to the national Zillow ZHVI top-100-metro average — what we
+     call "residential RE", measured <i>unlevered</i> (no mortgage assumed) and <i>net of nothing</i>
+     (rent income, maintenance, property tax, and transaction costs are all ignored). That makes
+     the comparison conservative for RE since the typical homeowner has both leverage (helps) and
+     carrying costs (hurts) that this benchmark omits.</p>
 
   <h4>Historical 3y / 5y annualized real returns (rolling, since 2000)</h4>
   {hedge_hist_html}
@@ -1395,7 +2100,7 @@ def main() -> None:
       <li><b>ZHVI ignores rent, maintenance, and property tax.</b> Our RE return is a pure
           price-index series (Zillow ZHVI). Real residential returns include rental yield
           (positive carry) and maintenance / tax / insurance / vacancy costs (negative carry).
-          The yield-aware <code>fwd_3y_total</code> model in section 7 partially addresses
+          The yield-aware <code>fwd_3y_total</code> model in section 8 partially addresses
           this for individual ZIPs, but not at the national-aggregate level shown here.</li>
       <li><b>No leverage assumed.</b> Real-estate investors typically run 4-5× leverage via a
           mortgage; the equity assets here are unlevered. A 3% nominal price return at 4×
@@ -1408,7 +2113,7 @@ def main() -> None:
     </ul>
   </div>
 
-  <h2>6 · Where might the model want to buy today?</h2>
+  <h2>7 · Where might the model want to buy today?</h2>
   {map_link_html}
   <p>Using the post-2012 LightGBM trained on 3-year forward returns, we scored every zip in the
      <b>top-100</b> US metros at the most recent month with enough feature coverage to make a confident
@@ -1420,7 +2125,7 @@ def main() -> None:
      of all predictions nationally. <b>Hover over any feature</b> to see its description.</p>
   {leaderboard_html}
 
-  <h3>6a · ZIP-level detail (top 20)</h3>
+  <h3>7a · ZIP-level detail (top 20)</h3>
   <p>The same model expanded back to per-ZIP rows for users who want to drill into specific neighborhoods
      rather than cities.</p>
   {zip_leaderboard_html}
@@ -1442,7 +2147,7 @@ def main() -> None:
     </ul>
   </div>
 
-  <h2>7 · Alternative ranking: yield-aware total return</h2>
+  <h2>8 · Alternative ranking: yield-aware total return</h2>
   <p>Everything above ranks zips by predicted <i>price</i> appreciation. An investor who cares about
      yield (rent flowing in, not just paper appreciation) wants a different ranking: a separate
      LightGBM trained on <code>fwd_3y_total = price_return + ZORI rent yield carry</code>. The
@@ -1471,10 +2176,11 @@ def main() -> None:
         download), NOAA VIIRS satellite nightlights (needs EOG creds + rasterio), Foursquare POIs,
         and FBI NIBRS crime aggregates (needs <code>CDE_API_KEY</code>) are wired into the assembler
         but blocked on credentials or manual fetch steps.</li>
-    <li><b>Owner-occupier overlay is geographically narrow.</b> 22 of 30 zips fall in the DC
-        metro because the filter chain (low climate risk + good schools + low disaster history +
-        high life expectancy + ≥50% owner-occupied) collapses to wealthy NoVA suburbs. Loosening
-        any single filter would broaden geography but trade off the buyer's stated priorities.</li>
+    <li><b>Owner-occupier overlay is geographically narrow.</b> {owner_occ_concentration}
+        because the filter chain (low climate risk + good schools + low disaster history +
+        high life expectancy + ≥50% owner-occupied) collapses to wealthy suburbs of one dominant
+        metro. Loosening any single filter would broaden geography but trade off the buyer's
+        stated priorities.</li>
     <li><b>Total-return modeling now done but on a smaller universe.</b> ZORI rent index covers
         only ~11% of zip-months, so <code>fwd_3y_total</code> trains on ~215K rows vs ~1.98M for
         price-only. The model's headline Spearman (0.42) and backtest hit-rate (100%) are real but
@@ -1490,30 +2196,9 @@ def main() -> None:
         designed.</li>
   </ul>
 
-  <h2>Glossary</h2>
-  <dl class='glossary'>
-    <dt>ZHVI</dt><dd>Zillow Home Value Index — a smoothed monthly home-value estimate per zip code.
-        The price series we predict.</dd>
-    <dt>ZORI</dt><dd>Zillow Observed Rent Index — companion rent index per zip; not yet used in the target.</dd>
-    <dt>CBSA</dt><dd>Core-Based Statistical Area — what Census calls a "metro area." 200 of these cover ~80%
-        of US population.</dd>
-    <dt>ZCTA</dt><dd>Zip Code Tabulation Area — Census's approximation of a USPS zip; ≈ but ≠ identical
-        to a zip.</dd>
-    <dt>fwd_1y / fwd_3y / fwd_5y</dt><dd>The forward home-price return at that zip over the next 1 / 3 / 5
-        years, annualized for the latter two. These are what we predict.</dd>
-    <dt>Decile spread</dt><dd>Mean realized return of the top-predicted 10% of zips minus the bottom 10%.
-        The bottom-line "would this model have helped me pick?" number.</dd>
-    <dt>Spearman ρ</dt><dd>Rank correlation between predicted and realized returns. Robust to outliers
-        and to wrong-magnitude predictions; only cares about ordering.</dd>
-    <dt>SHAP</dt><dd>Shapley Additive Explanations — a per-prediction decomposition into feature
-        contributions, summable to the model's output. Lets you say "this zip was ranked high
-        <i>because of</i> features X, Y, Z."</dd>
-    <dt>FEMA NRI</dt><dd>FEMA's National Risk Index — public free dataset of natural-hazard risk scores
-        at census-tract level. Used here as the climate-exposure proxy in place of paid First Street.</dd>
-  </dl>
-
-  <p class='footnote'>arbok · designed model-first, personal-overlay second · all data free /
-     public sources · code at <code>src/arbok/</code> · contact author for source / methodology questions.</p>
+  <p class='footnote'>arbok · model-first, personal-overlay layered on top · all data free /
+     public sources · code at <code>src/arbok/</code> ·
+     <a href='mailto:author@example.com'>contact</a> for source / methodology questions.</p>
 </body>
 </html>
 """
