@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - "data/processed/index.html"
-      - "data/processed/methods.html"
       - "data/processed/zip_decile_map.html"
       - "data/processed/assets/**"
       - ".github/workflows/pages.yml"
@@ -30,7 +29,6 @@ jobs:
         run: |
           mkdir -p _site
           cp data/processed/index.html _site/index.html
-          cp data/processed/methods.html _site/methods.html
           cp data/processed/zip_decile_map.html _site/zip_decile_map.html
           if [ -d data/processed/assets ]; then
             cp -R data/processed/assets _site/assets

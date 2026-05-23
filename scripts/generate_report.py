@@ -1547,35 +1547,47 @@ def _slugify(s: str) -> str:
     return s or "section"
 
 
-def _build_toc(sections: list[tuple[str, str]], cross_link_label: str,
-               cross_link_href: str) -> tuple[str, str]:
+def _build_toc(sections: list[tuple[str, str]], cross_link_label: str | None,
+               cross_link_href: str | None) -> tuple[str, str]:
     """Return (sidebar_html, mobile_details_html).
 
     `sections` is a list of (id, label) tuples in document order.
+    If `cross_link_label` / `cross_link_href` are None, no cross-page link is
+    rendered (used when the report is a single combined page).
     """
     items = "\n".join(
         f"      <li><a href='#{escape(sid)}'>{escape(label)}</a></li>"
         for sid, label in sections
+    )
+    cross_sidebar = (
+        f"    <div class='cross-link'>\n"
+        f"      <a href='{escape(cross_link_href)}'>&rarr; {escape(cross_link_label)}</a>\n"
+        f"    </div>"
+        if cross_link_label and cross_link_href
+        else ""
     )
     sidebar = f"""<nav class='toc' aria-label='Section navigation'>
     <h4>On this page</h4>
     <ul>
 {items}
     </ul>
-    <div class='cross-link'>
-      <a href='{escape(cross_link_href)}'>&rarr; {escape(cross_link_label)}</a>
-    </div>
+{cross_sidebar}
   </nav>"""
     mobile_items = "\n".join(
         f"        <li><a href='#{escape(sid)}'>{escape(label)}</a></li>"
         for sid, label in sections
+    )
+    cross_mobile = (
+        f"      <p style='margin:.5em 0 0 0;'><a href='{escape(cross_link_href)}'>&rarr; {escape(cross_link_label)}</a></p>"
+        if cross_link_label and cross_link_href
+        else ""
     )
     mobile = f"""<details class='toc-mobile'>
       <summary>Jump to section &#x25BE;</summary>
       <ul>
 {mobile_items}
       </ul>
-      <p style='margin:.5em 0 0 0;'><a href='{escape(cross_link_href)}'>&rarr; {escape(cross_link_label)}</a></p>
+{cross_mobile}
     </details>"""
     return sidebar, mobile
 
@@ -2312,6 +2324,137 @@ def _rewrite_overlay_headings(html: str) -> str:
     return html
 
 
+def _build_combined_html(ctx: dict) -> str:
+    """Single-page report: results sections 1-5 followed by methodology sections 6-10."""
+    import re
+
+    # Pull the bodies of the two existing builders, then stitch.
+    # NOTE: the CSS in <head> contains the literal string "<article>" inside a
+    # comment, so a naive `<article>([\s\S]*?)</article>` regex picks up the
+    # CSS comment as the opener. Anchor on the structural opener: only the
+    # real <article> sits inside <div class='layout'>.
+    idx_full = _build_index_html(ctx)
+    meth_full = _build_methods_html(ctx)
+    article_pat = r"<div class='layout'>[\s\S]*?<article>([\s\S]*?)</article>"
+    idx_body = re.search(article_pat, idx_full).group(1)
+    meth_body = re.search(article_pat, meth_full).group(1)
+
+    # --- Trim index body --------------------------------------------------
+    # Drop the "Read the deep dive" cross-page boxes/paragraphs and the
+    # footnote (we'll re-emit the footnote once at the end of the combined
+    # page).
+    idx_body = re.sub(r"<div class='cross-page'>[\s\S]*?</div>", "", idx_body)
+    idx_body = re.sub(
+        r"<p style='margin-top: 1em;'><a href='methods\.html'>[\s\S]*?</a></p>",
+        "", idx_body,
+    )
+    idx_body = re.sub(r"<p class='footnote'>[\s\S]*?</p>", "", idx_body)
+
+    # --- Trim methods body ------------------------------------------------
+    # Strip the page-level <h1>, the meta line, the back-link, the mobile TOC
+    # placeholder, the cross-page link box, and the footer-style cross link.
+    # Keep the "Why this study" + "Setup" sections in place — they'll
+    # naturally land after the results sections in the combined layout.
+    meth_body = re.sub(r"<h1>Methodology[\s\S]*?</h1>", "", meth_body)
+    meth_body = re.sub(r"<p class='meta'[^>]*>[\s\S]*?</p>", "", meth_body, count=1)
+    meth_body = re.sub(r"<p><a href='index\.html'>[\s\S]*?</a></p>", "", meth_body)
+    meth_body = re.sub(r"<details class='toc-mobile'>[\s\S]*?</details>", "", meth_body, count=1)
+    meth_body = re.sub(r"<div class='cross-page'>[\s\S]*?</div>", "", meth_body)
+    meth_body = re.sub(r"<p class='footnote'>[\s\S]*?</p>", "", meth_body)
+
+    # Renumber methods-section h2 prefixes 1..5 -> 6..10 in display text only.
+    # (Anchor IDs stay the same so existing inbound links / scroll-spy work.)
+    section_renumbers = [
+        (">1. Confidence", ">6. Confidence"),
+        (">2. Did this actually work", ">7. Did this actually work"),
+        (">3. Decile spread", ">8. Decile spread"),
+        (">4. What did the model learn", ">9. What did the model learn"),
+        (">5. Does the signal survive price stratification",
+         ">10. Does the signal survive price stratification"),
+    ]
+    for old_text, new_text in section_renumbers:
+        meth_body = meth_body.replace(old_text, new_text)
+
+    # Both _build_index_html and _build_methods_html inline the Plotly bundle
+    # (~4.6 MB each) on their first chart. When we concatenate, Plotly gets
+    # loaded twice. Strip the bundle from the methods body — the index body's
+    # bundle will be on the page already, so all subsequent chart-specific
+    # Plotly.newPlot scripts in the methods body still work.
+    def _strip_plotly_bundle(html: str) -> str:
+        # The bundle is the ~4.6 MB <script> whose body starts with the
+        # plotly.js header banner. Match the *whole* script tag containing
+        # that signature and remove it. Subsequent Plotly.newPlot scripts in
+        # the body stay — they reuse the bundle already loaded by the index
+        # half of the page.
+        pattern = r"<script[^>]*>/\*\*\s*\*\s*plotly\.js[\s\S]*?</script>"
+        return re.sub(pattern, "", html, count=1)
+    meth_body = _strip_plotly_bundle(meth_body)
+
+    # --- Build combined TOC ----------------------------------------------
+    sections = [
+        ("executive-summary", "Executive summary"),
+        ("how-to-read", "How to read this report"),
+        ("where-to-buy", "1. Where might the model want to buy today?"),
+        ("personal-overlay", "2. Personal-overlay shortlists (Phase 4)"),
+        ("macro-context", "3. Macro context: timing + hedges"),
+        ("alt-ranking", "4. Alternative ranking: yield-aware total return"),
+        ("headline-results", "5. Headline results"),
+        ("why-this-study", "Why this study exists"),
+        ("setup", "The setup in one minute"),
+        ("confidence", "6. Confidence: walk-forward + spatial robustness"),
+        ("backtest", "7. Did this actually work? — portfolio backtest"),
+        ("decile-spread", "8. Decile spread, every model × horizon × split"),
+        ("shap", "9. What did the model learn? — SHAP feature importance"),
+        ("price-stratification", "10. Does the signal survive price stratification?"),
+        ("caveats", "Caveats and what's not in this run"),
+    ]
+    toc_sidebar, toc_mobile = _build_toc(sections, cross_link_label=None, cross_link_href=None)
+
+    # --- Assemble body ----------------------------------------------------
+    # Replace index body's mobile-toc with the combined one (the index body
+    # starts with its own toc_mobile placeholder).
+    idx_body = re.sub(
+        r"<details class='toc-mobile'>[\s\S]*?</details>",
+        toc_mobile, idx_body, count=1,
+    )
+
+    # Append the methods content (intro + sections 6-10 + caveats) after the
+    # index body's "Headline results" section.
+    combined_body_inner = idx_body + "\n" + meth_body + (
+        "\n  <p class='footnote'>arbok &middot; model-first, personal-overlay layered on top "
+        "&middot; all data free / public sources &middot; code at <code>src/arbok/</code></p>\n"
+    )
+
+    # --- Re-compute reading time on the combined body --------------------
+    minutes = _reading_time(combined_body_inner)
+    combined_body_inner = re.sub(
+        r"~\d+ min read",
+        f"~{minutes} min read",
+        combined_body_inner,
+        count=1,
+    )
+
+    return f"""{_html_head(PAGE_TITLE_BASE)}
+<body>
+  <noscript>
+    <div class='nojs-banner'>
+      <b>Interactive charts require JavaScript.</b> The data tables and the
+      written analysis in each section will still render without it; the
+      hover-tooltips, sortable columns, and Plotly visualisations will not.
+    </div>
+  </noscript>
+  <div class='layout'>
+  {toc_sidebar}
+  <article>
+{combined_body_inner}
+  </article>
+  </div>
+{PAGE_SCRIPTS}
+</body>
+</html>
+"""
+
+
 def main() -> None:
     """Compute all data once; render index.html + methods.html."""
     print("Building charts…")
@@ -2622,23 +2765,17 @@ def main() -> None:
         fwd_illus_html=fwd_illus_html,
     )
 
-    # Render both pages.
-    index_html = _build_index_html(ctx)
-    methods_html = _build_methods_html(ctx)
-
+    # Render the single combined page (results + methodology under one TOC).
+    combined_html = _build_combined_html(ctx)
     out_index = PROCESSED / "index.html"
-    out_methods = PROCESSED / "methods.html"
-    out_index.write_text(index_html)
-    out_methods.write_text(methods_html)
+    out_index.write_text(combined_html)
     print(f"Wrote {out_index}  ({out_index.stat().st_size/1024:.1f} KB)")
-    print(f"Wrote {out_methods}  ({out_methods.stat().st_size/1024:.1f} KB)")
 
-    # Remove the stale single-page report.html (the workflow used to copy it
-    # to _site/index.html; we now copy index.html + methods.html directly).
-    old = PROCESSED / "report.html"
-    if old.exists():
-        old.unlink()
-        print(f"Removed legacy {old}")
+    # Remove stale outputs from the previous two-page layout.
+    for stale in (PROCESSED / "report.html", PROCESSED / "methods.html"):
+        if stale.exists():
+            stale.unlink()
+            print(f"Removed legacy {stale}")
 
 
 if __name__ == "__main__":
